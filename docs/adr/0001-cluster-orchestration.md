@@ -46,9 +46,11 @@ The orchestrator owns the stage state machine. It publishes stage N's jobs, coun
 7. **Source provisioning:** the runner path performs a shallow fetch of the repository at the run's commit before executing its job. v1 has no cache; a fetched-source cache is a follow-up when fetch time shows up in the profile.
 8. **Capacity:** a dispatcher's capacity is its concurrent-runner limit; capacity awareness is "do not read from the queue while full." Cluster elasticity is replica count.
 
-### Open question carried to the contract
+### Open question — settled in the contract pass (2026-10-12)
 
-Who fetches the repository for segmentation: the composer (clone once at intake, validate, attach resolved config to the run request — one fetch, validation at the door) or the orchestrator (fetch at segmentation time). Leaning: composer attaches; both sides must validate what they receive regardless.
+Who fetches the repository for segmentation: the composer (clone once at intake, validate, attach resolved config to the run request — one fetch, validation at the door) or the orchestrator (fetch at segmentation time). Leaning was: composer attaches; both sides must validate what they receive regardless.
+
+**Settled: the composer fetches and attaches.** The run request carries the resolved pipeline configuration as JSON pinned field-by-field in the dispatcher contract (§ Resolved pipeline configuration); the orchestrator segments from that object and never fetches. Recorded in the contract's field-by-field pass, agreed with the dispatcher repo on issue 35.
 
 ## When to revisit
 
