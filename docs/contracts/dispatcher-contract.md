@@ -1,6 +1,7 @@
 # Dispatcher contract
 
 - **Status:** Agreed (2026-10-12) — field-by-field pass complete; the pass was made against the dispatcher repo's `internal/config` and `internal/domain` as they exist on `main`, and agreement is recorded on odyssey-ci-cd-platform/dispatcher issue 35.
+- **Revision (2026-10-12, gh-9):** `origin` removed from the run request. The composer is a separate service (its own repo planned; services consolidate into a monorepo later): it consumes origin triggers and owns intake provenance — the orchestrator is origin-blind and never sees which surface produced a run. Nothing consumed the field; removal is safe. trigger_id stays as the composer's correlation/dedup handle.
 - **Binding for:** every message this repo publishes or consumes across the queue boundary.
 
 Two queues and one event bus bind this repo to the dispatcher repo. The event envelope itself is specified in the dispatcher repo (`internal/domain`, `Event`); this record fixes the queue messages and each side's emission responsibilities. Fields evolve additively only — consumers ignore unknown fields, producers never repurpose existing ones.
@@ -18,12 +19,11 @@ Trim policy: both queues carry work, not history — `MAXLEN` trimming (defaults
 
 ## Run request (composer → orchestrator)
 
-Published on `odyssey:pipeline-requests` after the composer has validated the trigger. This message binds this repo's two services to each other; the dispatcher never sees it. It is in this contract because the job assignment below is derived from it, and because both sides of the queue boundary validate at their trust boundary.
+Published on `odyssey:pipeline-requests` after the composer service has validated the trigger. The composer is a separate service (its own repo planned); this message binds it to this repo's orchestrator — the dispatcher never sees it. It is in this contract because the job assignment below is derived from it, and because both sides of the queue boundary validate at their trust boundary.
 
 ```json
 {
   "trigger_id": "hook:42",
-  "origin": "hook",
   "repo": "org/repo",
   "commit": "8f3a1c…full 40-hex sha",
   "pipeline": "demo",
@@ -33,8 +33,7 @@ Published on `odyssey:pipeline-requests` after the composer has validated the tr
 
 Field rules — all enforced by the composer before publish, re-checked by the orchestrator at consume:
 
-- `trigger_id` — non-empty string, opaque; provenance-tagged id from the origin (`hook:42`).
-- `origin` — one of `hook`, `ui`, `ci`. Any other value rejected at parse, not defaulted.
+- `trigger_id` — non-empty string, opaque; the composer's correlation/dedup handle for the trigger that produced the run (e.g. `hook:42`). The orchestrator never acts on it.
 - `repo` — `org/repo` slug as the dispatcher's source provisioning will fetch it. No full URLs, no protocol prefixes.
 - `commit` — full 40-hex sha. Short shas rejected: a run must be reproducible from its record.
 - `pipeline` — pipeline name from `[pipeline]` in `.odyssey/pipeline.toml`.

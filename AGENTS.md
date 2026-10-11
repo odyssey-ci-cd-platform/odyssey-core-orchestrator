@@ -1,6 +1,6 @@
 # odyssey-core-orchestrator
 
-The cluster-side orchestrator for the Odyssey CI/CD platform: intake (composer) plus the stage state machine (orchestrator). **Read `README.md` first** for the architecture and vocabulary — it and the ADRs are maintained design documents, not stale docs. Don't duplicate their content here; this file is operational notes only.
+The cluster-side orchestrator for the Odyssey CI/CD platform: the stage state machine that turns pipeline runs into job assignments. The intake half — the composer — is a separate service with its own planned repo (services consolidate into a monorepo later); this repo is the orchestrator only. **Read `README.md` first** for the architecture and vocabulary — it and the ADRs are maintained design documents, not stale docs. Don't duplicate their content here; this file is operational notes only.
 
 ## Commands
 

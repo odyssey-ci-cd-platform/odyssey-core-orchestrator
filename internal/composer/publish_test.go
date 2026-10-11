@@ -45,10 +45,15 @@ func TestPublishWritesEnvelope(t *testing.T) {
 	if err := json.Unmarshal([]byte(envelope), &doc); err != nil {
 		t.Fatalf("envelope is not JSON: %v\n%s", err, envelope)
 	}
-	for _, key := range []string{"trigger_id", "origin", "repo", "commit", "pipeline", "config"} {
+	for _, key := range []string{"trigger_id", "repo", "commit", "pipeline", "config"} {
 		if _, ok := doc[key]; !ok {
 			t.Errorf("envelope missing %q: %s", key, envelope)
 		}
+	}
+	// The orchestrator is origin-blind (gh-9): intake provenance never
+	// crosses the queue — the composer service owns it.
+	if _, ok := doc["origin"]; ok {
+		t.Errorf("envelope carries origin: %s", envelope)
 	}
 	config, ok := doc["config"].(map[string]any)
 	if !ok {
@@ -65,7 +70,7 @@ func TestPublishRefusesInvalidRequest(t *testing.T) {
 	pub, client := newTestRedis(t)
 
 	req := validRequest()
-	req.Origin = "cron"
+	req.Commit = "short"
 	err := pub.Publish(context.Background(), req)
 	if err == nil {
 		t.Fatal("Publish() error = nil, want refusal")
