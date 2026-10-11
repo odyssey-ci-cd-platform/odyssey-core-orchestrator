@@ -23,4 +23,4 @@ Run `.agents/bin/check-docs.sh` before committing Markdown changes; CI runs it a
 ## 2. Maintenance tasks
 
 - When Go code lands: add `go vet` / `go test ./...` / `go mod tidy -diff` / gofmt to the Makefile and CI, and update this section.
-- When the GitHub repository is created: enable branch protection (required `check` status, no direct pushes) before the first PR merges.
+- Branch protection on `main` is enabled (required `check` status, strict; admins enforced; stale-review dismissal on; no required approvals — solo merges). It was applied at repository creation, after the bootstrap commit; every later change lands through a PR.
