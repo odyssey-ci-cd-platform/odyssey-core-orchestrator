@@ -1,9 +1,9 @@
 # Dispatcher contract
 
-- **Status:** DRAFT — the field-by-field pass with the dispatcher repo is pending (both repos must agree before either codes against it)
-- **Binding for:** every message this repo publishes or consumes across the queue boundary
+- **Status:** Agreed (2026-10-12) — field-by-field pass complete; the pass was made against the dispatcher repo's `internal/config` and `internal/domain` as they exist on `main`, and agreement is recorded on odyssey-ci-cd-platform/dispatcher issue 35.
+- **Binding for:** every message this repo publishes or consumes across the queue boundary.
 
-Two queues and one event bus bind this repo to the dispatcher repo. The event envelope itself is already specified in the dispatcher repo (`internal/domain`, `Event`); this record fixes the queue messages and each side's emission responsibilities. Fields evolve additively only — consumers ignore unknown fields, producers never repurpose existing ones.
+Two queues and one event bus bind this repo to the dispatcher repo. The event envelope itself is specified in the dispatcher repo (`internal/domain`, `Event`); this record fixes the queue messages and each side's emission responsibilities. Fields evolve additively only — consumers ignore unknown fields, producers never repurpose existing ones.
 
 ## Streams
 
@@ -11,26 +11,60 @@ Two queues and one event bus bind this repo to the dispatcher repo. The event en
 |---|---|---|---|
 | `odyssey:pipeline-requests` | composer | orchestrator | run requests; one pipeline run each |
 | `odyssey:jobs` | orchestrator | dispatchers (shared consumer group `dispatchers`) | job assignments; ack on job completion |
+| `odyssey:jobs-dead` | dispatchers | human inspection | dead-lettered assignments, wrapped with a reason; never silently dropped |
 | `odyssey:events` | orchestrator + dispatchers | orchestrator, results-recorder, consumer services | lifecycle events, existing envelope |
 
-Trim policy: both queues carry work, not history — approximate `MAXLEN` trimming (workload-sized, documented in the deployment config). The event bus keeps its own trim from the dispatcher repo's ADR 0001.
+Trim policy: both queues carry work, not history — `MAXLEN` trimming (defaults below, overridable by deployment config). The event bus keeps its own trim from the dispatcher repo's ADR 0001.
 
 ## Run request (composer → orchestrator)
 
-Published on `odyssey:pipeline-requests` after the composer has validated the trigger.
+Published on `odyssey:pipeline-requests` after the composer has validated the trigger. This message binds this repo's two services to each other; the dispatcher never sees it. It is in this contract because the job assignment below is derived from it, and because both sides of the queue boundary validate at their trust boundary.
 
 ```json
 {
   "trigger_id": "hook:42",
-  "origin": "hook | ui | ci",
+  "origin": "hook",
   "repo": "org/repo",
-  "commit": "full sha",
-  "pipeline": "name from .odyssey/pipeline.toml",
-  "config": "<resolved pipeline.toml, attached by the composer — open question ADR 0001 §Open question>"
+  "commit": "8f3a1c…full 40-hex sha",
+  "pipeline": "demo",
+  "config": { "…resolved pipeline, schema below" }
 }
 ```
 
-Validation is the composer's job and happens before publish: a malformed pipeline configuration never reaches this stream.
+Field rules — all enforced by the composer before publish, re-checked by the orchestrator at consume:
+
+- `trigger_id` — non-empty string, opaque; provenance-tagged id from the origin (`hook:42`).
+- `origin` — one of `hook`, `ui`, `ci`. Any other value rejected at parse, not defaulted.
+- `repo` — `org/repo` slug as the dispatcher's source provisioning will fetch it. No full URLs, no protocol prefixes.
+- `commit` — full 40-hex sha. Short shas rejected: a run must be reproducible from its record.
+- `pipeline` — pipeline name from `[pipeline]` in `.odyssey/pipeline.toml`.
+- `config` — the resolved pipeline configuration as JSON (schema below), attached by the composer.
+
+### Resolved pipeline configuration (`config`)
+
+ADR 0001's open question is settled here: the composer fetches the repository shallowly at the run's commit, loads and validates `.odyssey/pipeline.toml`, and attaches the resolved configuration. The orchestrator segments from this object and never fetches; the dispatcher keeps parsing pipeline.toml nowhere — it executes assignments. The shape mirrors the dispatcher's `internal/config`/`internal/domain` one-to-one so either side can validate it structurally.
+
+```json
+{
+  "pipeline": "demo",
+  "stages": ["build", "test"],
+  "jobs": {
+    "compile": {
+      "stage": "build",
+      "image": "alpine",
+      "setup": ["apk add git"],
+      "env": { "KEY": "value" },
+      "steps": [{ "name": "compile", "run": "make", "timeout_ms": 300000 }]
+    }
+  }
+}
+```
+
+- `stages` — ordered; order is execution order; no duplicates; every stage has at least one job.
+- `jobs` — keyed by job name; each job's `stage` references a declared stage.
+- `setup` — optional array of shell commands run in order before the steps; a setup failure makes the job `errored` (mirrors the dispatcher's `SetupErr`).
+- `env` — string-to-string map; values are literal strings (secret interpolation is not this contract's concern).
+- `steps[].timeout_ms` — integer milliseconds; `0` means no timeout; negative values are invalid. The TOML key is `timeout`; the composer maps it to this explicit-units wire name.
 
 ## Job assignment (orchestrator → dispatchers)
 
@@ -46,34 +80,58 @@ Published on `odyssey:jobs`, one message per job. Carries run context and the jo
   "source": { "repo": "org/repo", "commit": "full sha" },
   "job_spec": {
     "image": "alpine",
+    "setup": ["apk add git"],
     "env": { "KEY": "value" },
     "steps": [{ "name": "compile", "run": "make", "timeout_ms": 300000 }]
   }
 }
 ```
 
-The dispatcher validates this at its trust boundary (a queue message is untrusted input): run id, pipeline, stage, job non-empty; exactly one image; at least one step. Invalid assignments dead-letter, they are never executed.
+- `run_id` — opaque string, generated by this repo's orchestrator, fresh per run attempt. A job re-executed after a dead dispatcher's reclaim runs under a new `run_id`; the results DB records the abandoned attempt as `pending` with no `finished_at`.
+- `attempt` — 1-based count of executions of this assignment across reclaims. This repo always publishes `1`; the dispatcher that reclaims a pending entry past the idle threshold increments it on the re-executed run.
+- `source` — what the dispatcher must provision before executing: shallow fetch of `repo` at `commit`.
+- `job_spec` — exactly one job from the run request's resolved `config`. Job name and stage ride the assignment envelope, not the spec; a dispatcher reconstructs its `domain.Job` as `{Name: job, Image, Setup, Env, Steps}` from both.
+
+### Validation at the dispatcher's trust boundary
+
+A queue message is untrusted input. The dispatcher rejects — dead-letters, never executes — an assignment that fails any of:
+
+- envelope: `run_id`, `pipeline`, `stage`, `job` non-empty; `attempt` ≥ 1; `source.repo` and `source.commit` non-empty.
+- `job_spec`: `image` non-empty; at least one step; per step, `name` and `run` non-empty and `timeout_ms` ≥ 0; every `setup` entry, when present, non-empty.
+
+These are the same rules `internal/config`'s `Validate` applies to pipeline.toml's job table, so both sides reject the same pipelines: what the composer accepts at the door, the dispatcher accepts at the wire, and nothing invalid survives either boundary.
+
+Dead-letter entries on `odyssey:jobs-dead` wrap the original message: `{ "reason": "validation" | "attempts", "assignment": { …original assignment JSON… } }`.
 
 ## Event emission responsibilities
 
-| Event | Emitter | Notes |
-|---|---|---|
-| `pipeline.started` | orchestrator | **before** publishing any job of the run — results DB parent-row invariant |
-| `pipeline.finished` | orchestrator | when the stage state machine resolves |
-| `job.started` / `job.finished` | dispatcher | payload carries `status`; `job.started` also `stage` |
-| `step.started` / `step.finished` | dispatcher | `step.finished` payload: `status`, `exit_code`, `duration_ms` — never stdout/stderr |
+| Event | Emitter | Envelope fields | Payload |
+|---|---|---|---|
+| `pipeline.started` | orchestrator (this repo) | `run_id`, `pipeline` | none — **before** publishing any job of the run: results DB parent-row invariant |
+| `pipeline.finished` | orchestrator (this repo) | `run_id`, `pipeline` | `status` — worst stage status: `passed` / `failed` / `errored` |
+| `job.started` | dispatcher | `run_id`, `pipeline`, `job` | `stage` |
+| `job.finished` | dispatcher | `run_id`, `pipeline`, `job` | `status` |
+| `step.started` | dispatcher | `run_id`, `pipeline`, `job`, `step` | none |
+| `step.finished` | dispatcher | `run_id`, `pipeline`, `job`, `step` | `status`, `exit_code`, `duration_ms` — never stdout/stderr |
 
-Envelope shape and payload discipline: see the dispatcher repo's `internal/domain` (`Event`) — the envelope is the shared contract and evolves additively only.
+The envelope is the dispatcher repo's `internal/domain` `Event` JSON (`type`, `occurred_at`, `run_id`, `pipeline`, `job`, `step`, `payload`) and evolves additively only there. `status` values are that module's `Status` slugs (`pending`, `running`, `passed`, `failed`, `skipped`, `errored`). Fail-fast is this repo's state-machine rule: the first `failed` or `errored` stage ends the run and no further stages are published.
 
 ## Delivery semantics
 
-- Dispatchers form one consumer group; each dispatcher reads only while it has a free runner slot (capacity awareness).
-- Ack happens **on job completion**, not on read. A dispatcher renews its pending entry (`XCLAIM ... JUSTID`) on an interval while its runner is alive, so long jobs are not reclaimed.
-- A dead dispatcher's entries are claimed by peers after the idle threshold and the job re-executes from scratch; the abandoned attempt is visible in the results DB as a run stuck `pending`.
-- Exhausted attempts dead-letter; poison assignments are inspected, never silently dropped.
+- Dispatchers form one consumer group (`dispatchers`); each dispatcher reads only while it has a free runner slot (capacity awareness).
+- Ack happens **on job completion**, not on read. A dispatcher renews its pending entry (`XCLAIM … JUSTID`) on the renewal interval while its runner is alive, so long jobs are not reclaimed.
+- A dead dispatcher's entries are claimed by peers after the idle threshold and the job re-executes from scratch under a new `run_id` and an incremented `attempt`; the abandoned attempt is visible in the results DB as a run stuck `pending`.
+- Assignments that fail validation dead-letter immediately. Assignments whose `attempt` exceeds the attempt limit dead-letter with reason `attempts` — a poison assignment that kills its dispatcher is caught by the reclaim loop at most `attempt-limit` times before it lands in the dead letter for inspection.
 
-## Parameters to fix in the field-by-field pass
+## Delivery parameters (v1 defaults, overridable by deployment config)
 
-- claim-renewal interval and idle threshold (must exceed sane job duration; renewal makes false reclaims rare)
-- `MAXLEN` per queue
-- attempt limits before dead-letter
+| Parameter | v1 default | Rationale |
+|---|---|---|
+| Claim-renewal interval | 30s | far below sane job duration; renewal makes false reclaims rare |
+| Idle threshold | 5m | comfortably above several missed renewals; reclaim means dead dispatcher |
+| Attempt limit | 3 | bounds the reclaim loop for poison assignments |
+| `MAXLEN`, `odyssey:pipeline-requests` | 10,000 | work, not history; sized well past any plausible backlog spike |
+| `MAXLEN`, `odyssey:jobs` | 100,000 | one entry per job; sized for bursty stages |
+| `MAXLEN`, `odyssey:jobs-dead` | 1,000 | inspection queue; small by design |
+
+These are defaults for a system with no load data yet. The deployment config overrides them; revisiting them from measured data is the trigger, not taste.
