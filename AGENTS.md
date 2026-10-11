@@ -4,7 +4,7 @@ The cluster-side orchestrator for the Odyssey CI/CD platform: intake (composer) 
 
 ## Commands
 
-- Gate: `make check` — the single gate every change must leave green. Today it runs the docs check; it grows the Go gate (`go vet`/`go test`/`go mod tidy -diff`/gofmt) when Go code lands, and CI runs both.
+- Gate: `make check` — the single gate every change must leave green: the docs check plus the Go gate (`go vet`, `go test ./...`, `go mod tidy -diff`, gofmt). CI runs both.
 - Docs check: `.agents/bin/check-docs.sh` — catches mid-sentence hard wraps in changed Markdown files.
 
 ## Workflow
@@ -43,5 +43,5 @@ The cluster-side orchestrator for the Odyssey CI/CD platform: intake (composer) 
 
 ## Gotchas
 
-- This repo is process scaffolding first: until Go code lands, `make check` is the docs check only — do not read a green `make check` as "the Go gate passed", because there is no Go gate yet.
-- The dispatcher contract in `docs/contracts/` is DRAFT until the field-by-field pass with the dispatcher repo completes; treat field names as unfrozen.
+- The Go gate is live (gh-5): `make check` runs the docs check and `go vet`/`go test`/`go mod tidy -diff`/gofmt; a green gate means both. This reverses the scaffolding-era warning that the gate was docs-only.
+- The dispatcher contract in `docs/contracts/` is frozen (gh-3, agreed with the dispatcher repo on its issue 35); it evolves additively only — new fields, never repurposed ones. This reverses the scaffolding-era DRAFT warning.

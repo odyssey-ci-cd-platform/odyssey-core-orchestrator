@@ -16,5 +16,9 @@ jobs:
           persist-credentials: false # the job only reads; no pushes
       - name: docs check
         run: .agents/bin/check-docs.sh origin/main
-      # When Go code lands, add actions/setup-go (go-version-file: go.mod)
-      # and `make check` — the dispatcher repo's ci.yml is the reference.
+      # actions/setup-go v5 — the dispatcher repo's ci.yml is the reference.
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+        with:
+          go-version-file: go.mod
+      - name: go gate
+        run: make check
