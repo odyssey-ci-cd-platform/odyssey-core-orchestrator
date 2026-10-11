@@ -1,6 +1,8 @@
 // Package pipeline loads and validates .odyssey/pipeline.toml into the
 // resolved configuration pinned by the dispatcher contract (§ Resolved
-// pipeline configuration). The composer is the only component that sees
+// pipeline configuration). Parse is the door: it decodes, rejects unknown
+// keys, and validates every rule before returning, so a returned Config is
+// always publishable as-is. The composer is the only component that sees
 // TOML; everything downstream of it consumes the resolved shape.
 package pipeline
 
