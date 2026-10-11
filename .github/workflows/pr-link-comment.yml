@@ -1,0 +1,34 @@
+---
+name: pr-link-comment
+
+on:
+  pull_request:
+    types: [opened]
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  link:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          BODY: ${{ github.event.pull_request.body }}
+          URL: ${{ github.event.pull_request.html_url }}
+        run: |
+          # Only the closing reference links the PR to an issue; a "#N"
+          # anywhere else in the body (e.g. an external citation) must not
+          # claim the link (AUD-020).
+          ref=$(printf '%s' "$BODY" \
+            | grep -iE \
+              '^[[:space:]]*(close[sd]?|fix(e[sd])?|resolve[sd]?) #[0-9]+' \
+            | head -1 \
+            | grep -oE '#[0-9]+' | head -1 \
+            | tr -d '#')
+          issue=$(printf '%s' "$ref" | tr -d '#')
+          if [ -n "$issue" ]; then
+            gh issue comment "$issue" --body "PR: $URL"
+          fi

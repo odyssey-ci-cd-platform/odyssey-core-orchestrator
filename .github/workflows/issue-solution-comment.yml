@@ -1,0 +1,22 @@
+---
+name: issue-solution-comment
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  comment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          GH_ISSUE: ${{ github.event.issue.number }}
+        run: |
+          gh issue comment "$GH_ISSUE" \
+            --body-file .github/issue-solution-template.md

@@ -1,0 +1,5 @@
+# Session state — never committed (AGENTS.md).
+STATE.md
+
+# Local tooling, if any (protoc et al. never enter this repo — no Go yet).
+.tools/
