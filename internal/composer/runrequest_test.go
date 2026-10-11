@@ -15,7 +15,6 @@ import (
 func validRequest() composer.RunRequest {
 	return composer.RunRequest{
 		TriggerID: "hook:42",
-		Origin:    composer.OriginHook,
 		Repo:      "org/repo",
 		Commit:    "8f3a1c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
 		Pipeline:  "demo",
@@ -49,16 +48,6 @@ func TestValidateRejectsContractViolations(t *testing.T) {
 			name:  "empty trigger id",
 			mutot: func(r *composer.RunRequest) { r.TriggerID = "" },
 			want:  "trigger_id must not be empty",
-		},
-		{
-			name:  "unknown origin",
-			mutot: func(r *composer.RunRequest) { r.Origin = "cron" },
-			want:  `origin must be one of hook, ui, ci, got "cron"`,
-		},
-		{
-			name:  "empty origin",
-			mutot: func(r *composer.RunRequest) { r.Origin = "" },
-			want:  "origin must be one of",
 		},
 		{
 			name:  "repo without separator",
@@ -126,13 +115,12 @@ func TestValidateAcceptsUppercaseSha(t *testing.T) {
 func TestValidateReportsAllViolationsTogether(t *testing.T) {
 	req := validRequest()
 	req.TriggerID = ""
-	req.Origin = "cron"
 	req.Commit = "short"
 	err := req.Validate()
 	if err == nil {
 		t.Fatal("Validate() error = nil, want violations")
 	}
-	for _, want := range []string{"trigger_id must not be empty", "origin must be one of", "commit must be a full 40-hex sha"} {
+	for _, want := range []string{"trigger_id must not be empty", "commit must be a full 40-hex sha"} {
 		if !strings.Contains(err.Error(), want) {
 			t.Errorf("error %q missing %q", err, want)
 		}

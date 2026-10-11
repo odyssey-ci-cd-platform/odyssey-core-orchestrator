@@ -1,30 +1,32 @@
 # odyssey-core-orchestrator
 
-The cluster-side orchestrator for the Odyssey CI/CD platform: it turns pipeline triggers into job assignments and owns the stage state machine.
+The cluster-side orchestrator for the Odyssey CI/CD platform: it turns pipeline runs into job assignments and owns the stage state machine.
 
-Not a fork of the execution engine — this repo contains no runner management and executes nothing. It composes two services:
+Not a fork of the execution engine — this repo contains no runner management and executes nothing. It is one service:
 
-- **composer** — intake: consumes origin triggers (repo hook, UI, CI), validates the pipeline configuration at the door, publishes run requests onto the pipeline queue. Fire-and-forget.
-- **orchestrator** — consumes run requests, segments the pipeline into jobs, publishes assignments to the job queue, and consumes `job.finished` events to sequence stages (fail-fast: the first Failed or Errored stage ends the run) and emit `pipeline.*` lifecycle events.
+- **orchestrator** — consumes run requests, re-validates them at its trust boundary, segments the pipeline into jobs, publishes assignments to the job queue, and consumes `job.finished` events to sequence stages (fail-fast: the first Failed or Errored stage ends the run) and emit `pipeline.*` lifecycle events.
 
-The execution side lives in the **dispatcher** repo (`odyssey-ci-cd-platform/dispatcher`): it consumes the job queue, spawns ephemeral runner containers (one job each), and emits `job.*`/`step.*` events. This README scopes to this repo; everything outside it (triggers, dispatcher, results-recorder, consumer services) appears only as a boundary.
+The intake half — the **composer** — is a separate service with its own planned repo: it consumes origin triggers (repo hook, UI, CI), validates the pipeline configuration at the door, and publishes run requests onto the pipeline queue. Services live in separate repos today (small integration tests, exact per-repo style, low PR volume) and consolidate into a monorepo later.
+
+The execution side lives in the **dispatcher** repo (`odyssey-ci-cd-platform/dispatcher`): it consumes the job queue, spawns ephemeral runner containers (one job each), and emits `job.*`/`step.*` events. This README scopes to this repo; everything outside it (composer, triggers, dispatcher, results-recorder, consumer services) appears only as a boundary.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
     subgraph repo["this repo"]
-        composer["composer
-        validates at intake · fire-and-forget"]
         orch["orchestrator
+        re-validates at the boundary
         segments pipeline into jobs
         stage state machine · fail-fast"]
-        pq(("odyssey:pipeline-requests"))
         jq(("odyssey:jobs"))
     end
 
-    origins["triggers
-    repo hook · UI · CI"]
+    composer["composer service
+    consumes origin triggers, shapes them
+    into run requests · fire-and-forget
+    (own repo, planned)"]
+    pq(("odyssey:pipeline-requests"))
     dispatch["dispatcher repo
     consumes assignments, runs jobs,
     emits job.* / step.* events"]
@@ -32,8 +34,9 @@ flowchart LR
     downstream["elsewhere: results-recorder
     → results DB; consumer services"]
 
-    origins --> composer
-    composer -- "run request" --> pq
+    composer -- "run request
+    (no origin: intake provenance
+    is composer-owned)" --> pq
     pq -- "consume" --> orch
     orch -- "1. pipeline.started" --> bus
     orch -- "2. job assignments:
@@ -55,8 +58,8 @@ flowchart LR
 
 | Name | Thing |
 |---|---|
-| composer | intake service in this repo: validate triggers, publish run requests |
-| orchestrator | segmentation + stage state machine in this repo |
+| composer | separate intake service (own repo planned): consumes origin triggers, shapes them into run requests, publishes to the pipeline queue |
+| orchestrator | this repo: re-validates run requests, segmentation + stage state machine |
 | dispatcher | node daemon in the dispatcher repo: consume assignments, manage runners |
 | runner | ephemeral docker container executing exactly one job |
 | event bus | `odyssey:events` Redis Stream — the only outcome channel |
@@ -64,6 +67,7 @@ flowchart LR
 
 ## Non-goals
 
+- No intake transport — consuming origins (hook, UI, CI) and shaping them into run requests is the composer service's job, in its own repo.
 - No runner management, container handling, or execution — see the dispatcher repo.
 - No per-test analytics, visualization, or notification — consumer services' territory.
 - No priorities, quotas, dedup, or commit-status push — deferred until the pipeline above works end to end (one issue each when queued).
@@ -71,5 +75,5 @@ flowchart LR
 ## Documents
 
 - [ADR 0001: cluster orchestration](docs/adr/0001-cluster-orchestration.md)
-- [Dispatcher contract](docs/contracts/dispatcher-contract.md) — the message schemas binding this repo to the dispatcher repo
+- [Dispatcher contract](docs/contracts/dispatcher-contract.md) — the message schemas binding this repo to the composer service (run requests) and the dispatcher repo (assignments, events)
 - Design discussion: odyssey-ci-cd-platform/dispatcher issue 35

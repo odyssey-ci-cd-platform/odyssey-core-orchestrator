@@ -1,6 +1,11 @@
 // Package composer turns origin triggers into validated run requests and
 // publishes them onto the pipeline-requests queue. It is fire-and-forget by
 // design (ADR 0001): nothing here tracks what happens to a run afterwards.
+//
+// The composer is a separate service with its own planned repo (gh-9); this
+// package is its seed and migrates there at that repo's bootstrap. This
+// repo consumes run requests and is origin-blind: intake provenance never
+// crosses the queue.
 package composer
 
 import (
@@ -11,20 +16,12 @@ import (
 	"github.com/odyssey-ci-cd-platform/odyssey-core-orchestrator/internal/pipeline"
 )
 
-// Origin names where a trigger came from (contract § Run request).
-type Origin string
-
-const (
-	OriginHook Origin = "hook"
-	OriginUI   Origin = "ui"
-	OriginCI   Origin = "ci"
-)
-
 // RunRequest is the message a validated trigger becomes: the contract's
 // § Run request shape with the resolved pipeline configuration attached.
+// It carries no origin — the composer service owns intake provenance and
+// validates its inputs internally; the orchestrator never sees it.
 type RunRequest struct {
 	TriggerID string          `json:"trigger_id"`
-	Origin    Origin          `json:"origin"`
 	Repo      string          `json:"repo"`
 	Commit    string          `json:"commit"`
 	Pipeline  string          `json:"pipeline"`
@@ -39,11 +36,6 @@ func (r RunRequest) Validate() error {
 
 	if r.TriggerID == "" {
 		errs = append(errs, errors.New("trigger_id must not be empty"))
-	}
-	switch r.Origin {
-	case OriginHook, OriginUI, OriginCI:
-	default:
-		errs = append(errs, fmt.Errorf("origin must be one of hook, ui, ci, got %q", r.Origin))
 	}
 	if !validRepo(r.Repo) {
 		errs = append(errs, fmt.Errorf("repo must be owner/repo, got %q", r.Repo))
