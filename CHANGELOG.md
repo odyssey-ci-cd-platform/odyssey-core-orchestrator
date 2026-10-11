@@ -8,6 +8,8 @@ Notable changes to odyssey-core-orchestrator. Latest changes go at the top, unde
 - Process scaffolding: README with the architecture diagram and vocabulary, AGENTS.md conventions, RUNBOOK, docs-check gate, CI and issue/PR automation workflows, ship/merge scripts.
 - ADR 0001: cluster orchestration — job-grain distribution, stateful stage state machine, feedback edge, failure modes, restart story.
 - Dispatcher contract draft: streams, run request, job assignment, event emission responsibilities, delivery semantics.
+- `internal/pipeline` (gh-5): parses and validates `.odyssey/pipeline.toml` into the contract's resolved configuration — TOML in, wire-shaped JSON out, `timeout` mapped to `timeout_ms`; every contract validation rule enforced and table-tested, all violations reported in one joined error, unknown keys rejected (parity with the dispatcher's config loader).
+- The Go gate (gh-5): `go vet` / `go test ./...` / `go mod tidy -diff` / gofmt in `make check` and CI; RUNBOOK records the baseline.
 
 ### Changed
 - Scoped the README to this repo: the architecture diagram keeps only composer and orchestrator inside the repo boundary, with triggers, the dispatcher repo, the event bus, and downstream consumers as boundary nodes, and the reading notes restate dispatcher-side mechanics as boundary references. Cross-references now name `odyssey-ci-cd-platform/dispatcher` (the current location of the repo formerly named `odyssey-core-agent`).
