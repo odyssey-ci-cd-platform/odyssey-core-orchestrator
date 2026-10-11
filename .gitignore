@@ -3,3 +3,6 @@ STATE.md
 
 # Local tooling, if any (protoc et al. never enter this repo — no Go yet).
 .tools/
+
+# Harness gate config — machine-local paths (allowPaths), not repo content.
+gates.json
