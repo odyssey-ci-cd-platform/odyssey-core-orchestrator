@@ -67,37 +67,40 @@ func Parse(data []byte) (Config, error) {
 		}
 		return Config{}, fmt.Errorf("pipeline.toml has unknown keys: %s", strings.Join(keys, ", "))
 	}
-	if err := validate(root); err != nil {
-		return Config{}, fmt.Errorf("invalid pipeline config: %w", err)
-	}
-	return Config{
+	cfg := Config{
 		Pipeline: root.Pipeline.Name,
 		Stages:   root.Pipeline.Stages,
 		Jobs:     root.Jobs,
-	}, nil
+	}
+	if err := cfg.Validate(); err != nil {
+		return Config{}, fmt.Errorf("invalid pipeline config: %w", err)
+	}
+	return cfg, nil
 }
 
-// validate enforces the contract's rules — the same set as the dispatcher
-// repo's internal/config Validate, so what passes here passes there.
-func validate(root tomlRoot) error {
+// Validate enforces the contract's rules on the resolved configuration —
+// the same set as the dispatcher repo's internal/config Validate, so what
+// passes here passes there. It runs on the decoded shape, so any component
+// receiving a Config over the wire can re-check it without a TOML parser.
+func (c Config) Validate() error {
 	var errs []error
 
-	if len(root.Pipeline.Stages) == 0 {
+	if len(c.Stages) == 0 {
 		errs = append(errs, errors.New("pipeline must declare at least one stage"))
 	}
 	seen := make(map[string]bool)
-	for _, stage := range root.Pipeline.Stages {
+	for _, stage := range c.Stages {
 		if seen[stage] {
 			errs = append(errs, fmt.Errorf("duplicate stage name: %q", stage))
 		}
 		seen[stage] = true
 	}
 
-	if len(root.Jobs) == 0 {
+	if len(c.Jobs) == 0 {
 		errs = append(errs, errors.New("pipeline must define at least one job"))
 	}
 	jobsPerStage := make(map[string]int)
-	for name, job := range root.Jobs {
+	for name, job := range c.Jobs {
 		jobsPerStage[job.Stage]++
 		if job.Stage == "" {
 			errs = append(errs, fmt.Errorf("job %q: stage must not be empty", name))
@@ -128,7 +131,7 @@ func validate(root tomlRoot) error {
 		}
 	}
 
-	for _, stage := range root.Pipeline.Stages {
+	for _, stage := range c.Stages {
 		if jobsPerStage[stage] == 0 {
 			errs = append(errs, fmt.Errorf("stage %q has no jobs", stage))
 		}
