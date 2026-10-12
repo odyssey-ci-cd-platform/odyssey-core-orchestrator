@@ -5,6 +5,7 @@ Notable changes to odyssey-core-orchestrator. Latest changes go at the top, unde
 ## [Unreleased]
 
 ### Added
+- `internal/orchestrator` (gh-11): the pure segmentation slice — decodes a contract run-request envelope into the orchestrator's own consumer-side type (unknown fields ignored per additive evolution, no composer import), re-validates the envelope and the attached config at the trust boundary (shared rule set via the new `pipeline.Config.Validate`, so both boundaries reject the same pipelines with no TOML parser downstream), and turns a validated request plus a run id into contract-shaped job assignments: one per job, declared stage order, job names sorted within a stage (AUD-008), attempt 1, source carried through, job spec mirroring the resolved config, never outcomes. `Segment` documents the pipeline.started-before-any-assignment invariant at the segmentation site. No queue loop yet — that is the next work item.
 - Process scaffolding: README with the architecture diagram and vocabulary, AGENTS.md conventions, RUNBOOK, docs-check gate, CI and issue/PR automation workflows, ship/merge scripts.
 - ADR 0001: cluster orchestration — job-grain distribution, stateful stage state machine, feedback edge, failure modes, restart story.
 - Dispatcher contract draft: streams, run request, job assignment, event emission responsibilities, delivery semantics.

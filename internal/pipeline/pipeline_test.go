@@ -358,6 +358,36 @@ run = "make"
 	}
 }
 
+// The orchestrator re-validates decoded configs at its trust boundary —
+// the rule set must hold on a constructed Config, not only on TOML bytes
+// (gh-11; contract § Resolved pipeline configuration).
+func TestConfigValidateDirect(t *testing.T) {
+	valid := pipeline.Config{
+		Pipeline: "demo",
+		Stages:   []string{"build"},
+		Jobs: map[string]pipeline.Job{
+			"compile": {Stage: "build", Image: "alpine", Steps: []pipeline.Step{{Name: "compile", Run: "make"}}},
+		},
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v, want nil", err)
+	}
+
+	bad := valid
+	bad.Jobs = map[string]pipeline.Job{
+		"compile": {Stage: "nope", Image: "alpine", Steps: []pipeline.Step{{Name: "compile", Run: "make", TimeoutMS: -1}}},
+	}
+	err := bad.Validate()
+	if err == nil {
+		t.Fatal("Validate() error = nil, want violations")
+	}
+	for _, want := range []string{"is not declared", "must not be negative"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Validate() error = %q, want it to contain %q", err, want)
+		}
+	}
+}
+
 // The contract requires both boundaries to reject the same pipelines; the
 // composer reports every violation in one pass, not the first one.
 func TestParseReportsAllViolationsTogether(t *testing.T) {
