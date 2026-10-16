@@ -12,10 +12,15 @@ The cluster-side orchestrator for the Odyssey CI/CD platform: the stage state ma
 - Multi-commit work needs a GitHub issue first (template: Work item). An issue describes the work needed — the outcome or business requirement — never the code change. One-commit tasks get no issue.
 - A workflow posts the solution template as the first issue comment automatically; the first actionable is filling it in — edit the posted comment, keep every header, N/A where not applicable.
 - Branch per work item: `feature/<issue-number>`, or issueless `type/slug`. All changes land through PRs — main is protected (required `check` status, no direct pushes).
-- Tests come before changes: the intent test is red first, then the change turns it green.
 - One-shot PR flow: `scripts/ship-pr.sh <branch> <title> [body-file]` (push, open PR, watch CI), `scripts/merge-pr.sh <branch>` (merge, delete branch, sync main).
 - Intermediate session state lives in `STATE.md` (repo root, gitignored, never committed).
 - Operational procedures and the recorded baseline live in `RUNBOOK.md`; update it in the same commit that changes what a procedure does.
+
+## Agent guardrails
+
+- Filesystem boundary: operate only within this repository, its parent directory (the `odyssey/` checkout), and their sub-folders — reads and writes alike, nothing outside.
+- Tests come first and throughout: every behavior slice lands as a failing intent test before any production code, then the smallest change that turns it green.
+- Tests are the source of truth: they pin expected behavior through observable outputs and contract shapes, never implementation details. If a test only passes against today's implementation, the test is wrong — fix it to test the behavior, and say why in the commit.
 
 ## Design principles (from the README and the sibling dispatcher repo, worth restating)
 
