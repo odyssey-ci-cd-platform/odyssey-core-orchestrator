@@ -43,7 +43,12 @@ func (j *journal) snapshot() []string {
 type fakeEvents struct{ j *journal }
 
 func (f fakeEvents) Publish(_ context.Context, e orchestrator.Event) error {
-	f.j.record("started:" + e.RunID)
+	switch e.Type {
+	case orchestrator.EventPipelineStarted:
+		f.j.record("started:" + e.RunID)
+	case orchestrator.EventPipelineFinished:
+		f.j.record("finished:" + e.RunID + ":" + e.Payload["status"])
+	}
 	if f.j.failEmit {
 		return errors.New("bus unreachable")
 	}
@@ -63,7 +68,7 @@ func newTestLoop(t *testing.T, j *journal) (*orchestrator.Loop, *redis.Client, c
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	loop := orchestrator.NewLoop(client, fakeEvents{j}, fakeAssignments{j})
+	loop := orchestrator.NewLoop(client, orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}))
 	loop.Block = 25 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -96,11 +101,11 @@ func waitFor(t *testing.T, j *journal, n int) {
 	t.Fatalf("journal has %d entries, want %d within deadline:\n%v", len(j.snapshot()), n, j.snapshot())
 }
 
-func waitAcked(t *testing.T, client *redis.Client) {
+func waitAcked(t *testing.T, client *redis.Client, stream string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		pending, err := client.XPending(context.Background(), orchestrator.StreamPipelineRequests, "orchestrator").Result()
+		pending, err := client.XPending(context.Background(), stream, "orchestrator").Result()
 		if err != nil {
 			t.Fatalf("XPending() error = %v", err)
 		}
@@ -109,7 +114,7 @@ func waitAcked(t *testing.T, client *redis.Client) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("entries still pending after deadline, want all acknowledged")
+	t.Fatalf("entries on %s still pending after deadline, want all acknowledged", stream)
 }
 
 func stopLoop(t *testing.T, cancel context.CancelFunc, done <-chan error) {
@@ -142,22 +147,22 @@ func TestLoopHandsOffValidRun(t *testing.T) {
 	_, client, cancel, done := newTestLoop(t, j)
 	seed(t, client, validEnvelope)
 
-	waitFor(t, j, 3) // one started + two assignments
-	waitAcked(t, client)
+	waitFor(t, j, 2) // one started + the first stage only
+	waitAcked(t, client, orchestrator.StreamPipelineRequests)
 	stopLoop(t, cancel, done)
 
 	entries := j.snapshot()
-	if len(entries) != 3 {
-		t.Fatalf("journal = %v, want exactly one run's hand-off", entries)
+	if len(entries) != 2 {
+		t.Fatalf("journal = %v, want started plus the first stage only (later stages wait on job.finished)", entries)
 	}
-	// The run id comes from the assignment entries; the started event must
-	// carry the same id and precede both.
+	// The run id comes from the assignment entry; the started event must
+	// carry the same id and precede it.
 	id := runIDOf(entries[1])
 	if entries[0] != "started:"+id {
 		t.Errorf("first entry = %q, want the started event under run id %q", entries[0], id)
 	}
-	if entries[1] != "assign:"+id+":build/compile" || entries[2] != "assign:"+id+":test/test" {
-		t.Errorf("assignments = %v, want stage-ordered build/compile then test/test under run id %q", entries[1:], id)
+	if entries[1] != "assign:"+id+":build/compile" {
+		t.Errorf("assignment = %q, want the first stage's build/compile under run id %q", entries[1], id)
 	}
 	ids := startedIDs(entries)
 	if len(ids) != 1 || ids[0] == "" {
@@ -178,8 +183,8 @@ func TestLoopAssignsFreshRunIDPerRun(t *testing.T) {
 	seed(t, client, validEnvelope)
 	seed(t, client, validEnvelope)
 
-	waitFor(t, j, 6) // two runs, one started + two assignments each
-	waitAcked(t, client)
+	waitFor(t, j, 4) // two runs, one started + first stage each
+	waitAcked(t, client, orchestrator.StreamPipelineRequests)
 	stopLoop(t, cancel, done)
 
 	ids := startedIDs(j.snapshot())
@@ -207,8 +212,8 @@ func TestLoopSkipsPoisonEntries(t *testing.T) {
 			seed(t, client, tt.poison)
 			seed(t, client, validEnvelope)
 
-			waitFor(t, j, 3) // only the valid run's hand-off
-			waitAcked(t, client)
+			waitFor(t, j, 2) // only the valid run's hand-off
+			waitAcked(t, client, orchestrator.StreamPipelineRequests)
 			stopLoop(t, cancel, done)
 
 			ids := startedIDs(j.snapshot())
@@ -226,8 +231,8 @@ func TestLoopPublishesAssignmentsWhenEmitFails(t *testing.T) {
 	_, client, cancel, done := newTestLoop(t, j)
 	seed(t, client, validEnvelope)
 
-	waitFor(t, j, 2) // the two assignments, no usable started event
-	waitAcked(t, client)
+	waitFor(t, j, 2) // the started receipt plus the first stage's assignment
+	waitAcked(t, client, orchestrator.StreamPipelineRequests)
 	stopLoop(t, cancel, done)
 
 	assigns := 0
@@ -236,8 +241,8 @@ func TestLoopPublishesAssignmentsWhenEmitFails(t *testing.T) {
 			assigns++
 		}
 	}
-	if assigns != 2 {
-		t.Errorf("%d assignments handed off despite the emit failure, want 2", assigns)
+	if assigns != 1 {
+		t.Errorf("%d assignments handed off despite the emit failure, want the first stage's one", assigns)
 	}
 }
 
@@ -246,7 +251,7 @@ func TestLoopStopsWhenContextCancelledBeforeStart(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	loop := orchestrator.NewLoop(client, fakeEvents{&journal{}}, fakeAssignments{&journal{}})
+	loop := orchestrator.NewLoop(client, orchestrator.NewMachine(fakeEvents{&journal{}}, fakeAssignments{&journal{}}))
 	loop.Block = 25 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())

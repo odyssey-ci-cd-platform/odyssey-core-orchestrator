@@ -26,6 +26,15 @@ const (
 // § Event emission responsibilities).
 const EventPipelineStarted = "pipeline.started"
 
+// EventPipelineFinished is emitted when the state machine resolves the
+// run; its payload carries the run's worst status (contract § Event
+// emission responsibilities).
+const EventPipelineFinished = "pipeline.finished"
+
+// EventJobFinished is the dispatcher's job outcome event; the machine
+// sequences stages on it (contract § Event emission responsibilities).
+const EventJobFinished = "job.finished"
+
 // Event is this repo's emit-side envelope, matching the dispatcher repo's
 // internal/domain Event JSON field for field — the bus is a shared
 // boundary, so both producers write the same shape and consumers cannot
