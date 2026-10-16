@@ -101,11 +101,11 @@ func waitFor(t *testing.T, j *journal, n int) {
 	t.Fatalf("journal has %d entries, want %d within deadline:\n%v", len(j.snapshot()), n, j.snapshot())
 }
 
-func waitAcked(t *testing.T, client *redis.Client) {
+func waitAcked(t *testing.T, client *redis.Client, stream string) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		pending, err := client.XPending(context.Background(), orchestrator.StreamPipelineRequests, "orchestrator").Result()
+		pending, err := client.XPending(context.Background(), stream, "orchestrator").Result()
 		if err != nil {
 			t.Fatalf("XPending() error = %v", err)
 		}
@@ -114,7 +114,7 @@ func waitAcked(t *testing.T, client *redis.Client) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("entries still pending after deadline, want all acknowledged")
+	t.Fatalf("entries on %s still pending after deadline, want all acknowledged", stream)
 }
 
 func stopLoop(t *testing.T, cancel context.CancelFunc, done <-chan error) {
@@ -148,7 +148,7 @@ func TestLoopHandsOffValidRun(t *testing.T) {
 	seed(t, client, validEnvelope)
 
 	waitFor(t, j, 2) // one started + the first stage only
-	waitAcked(t, client)
+	waitAcked(t, client, orchestrator.StreamPipelineRequests)
 	stopLoop(t, cancel, done)
 
 	entries := j.snapshot()
@@ -184,7 +184,7 @@ func TestLoopAssignsFreshRunIDPerRun(t *testing.T) {
 	seed(t, client, validEnvelope)
 
 	waitFor(t, j, 4) // two runs, one started + first stage each
-	waitAcked(t, client)
+	waitAcked(t, client, orchestrator.StreamPipelineRequests)
 	stopLoop(t, cancel, done)
 
 	ids := startedIDs(j.snapshot())
@@ -213,7 +213,7 @@ func TestLoopSkipsPoisonEntries(t *testing.T) {
 			seed(t, client, validEnvelope)
 
 			waitFor(t, j, 2) // only the valid run's hand-off
-			waitAcked(t, client)
+			waitAcked(t, client, orchestrator.StreamPipelineRequests)
 			stopLoop(t, cancel, done)
 
 			ids := startedIDs(j.snapshot())
@@ -232,7 +232,7 @@ func TestLoopPublishesAssignmentsWhenEmitFails(t *testing.T) {
 	seed(t, client, validEnvelope)
 
 	waitFor(t, j, 2) // the started receipt plus the first stage's assignment
-	waitAcked(t, client)
+	waitAcked(t, client, orchestrator.StreamPipelineRequests)
 	stopLoop(t, cancel, done)
 
 	assigns := 0
