@@ -78,6 +78,41 @@ func Parse(data []byte) (Config, error) {
 	return cfg, nil
 }
 
+// Validate checks one job's spec against the contract's job rules — the
+// same set Config.Validate applies per job, shared so an assignment
+// producer rejects at the wire exactly what config validation rejects at
+// the door. name identifies the job in error messages.
+func (j Job) Validate(name string) error {
+	var errs []error
+
+	if j.Stage == "" {
+		errs = append(errs, fmt.Errorf("job %q: stage must not be empty", name))
+	}
+	if j.Image == "" {
+		errs = append(errs, fmt.Errorf("job %q: image must not be empty", name))
+	}
+	for i, setup := range j.Setup {
+		if setup == "" {
+			errs = append(errs, fmt.Errorf("job %q: setup entry %d must not be empty", name, i+1))
+		}
+	}
+	if len(j.Steps) == 0 {
+		errs = append(errs, fmt.Errorf("job %q: must define at least one step", name))
+	}
+	for i, step := range j.Steps {
+		if step.Name == "" {
+			errs = append(errs, fmt.Errorf("job %q: step %d: name must not be empty", name, i+1))
+		}
+		if step.Run == "" {
+			errs = append(errs, fmt.Errorf("job %q: step %d (%q): run must not be empty", name, i+1, step.Name))
+		}
+		if step.TimeoutMS < 0 {
+			errs = append(errs, fmt.Errorf("job %q: step %d (%q): timeout must not be negative (milliseconds)", name, i+1, step.Name))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // Validate enforces the contract's rules on the resolved configuration —
 // the same set as the dispatcher repo's internal/config Validate, so what
 // passes here passes there. It runs on the decoded shape, so any component
@@ -102,32 +137,11 @@ func (c Config) Validate() error {
 	jobsPerStage := make(map[string]int)
 	for name, job := range c.Jobs {
 		jobsPerStage[job.Stage]++
-		if job.Stage == "" {
-			errs = append(errs, fmt.Errorf("job %q: stage must not be empty", name))
-		} else if !seen[job.Stage] {
+		if job.Stage != "" && !seen[job.Stage] {
 			errs = append(errs, fmt.Errorf("job %q: stage %q is not declared in pipeline.stages", name, job.Stage))
 		}
-		if job.Image == "" {
-			errs = append(errs, fmt.Errorf("job %q: image must not be empty", name))
-		}
-		for i, setup := range job.Setup {
-			if setup == "" {
-				errs = append(errs, fmt.Errorf("job %q: setup entry %d must not be empty", name, i+1))
-			}
-		}
-		if len(job.Steps) == 0 {
-			errs = append(errs, fmt.Errorf("job %q: must define at least one step", name))
-		}
-		for i, step := range job.Steps {
-			if step.Name == "" {
-				errs = append(errs, fmt.Errorf("job %q: step %d: name must not be empty", name, i+1))
-			}
-			if step.Run == "" {
-				errs = append(errs, fmt.Errorf("job %q: step %d (%q): run must not be empty", name, i+1, step.Name))
-			}
-			if step.TimeoutMS < 0 {
-				errs = append(errs, fmt.Errorf("job %q: step %d (%q): timeout must not be negative (milliseconds)", name, i+1, step.Name))
-			}
+		if err := job.Validate(name); err != nil {
+			errs = append(errs, err)
 		}
 	}
 
