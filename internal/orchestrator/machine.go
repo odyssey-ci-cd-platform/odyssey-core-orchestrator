@@ -119,3 +119,95 @@ func jobNames(stage []Assignment) map[string]bool {
 	}
 	return names
 }
+
+// JobFinished applies one dispatcher job outcome to its run. The job
+// leaves the current stage's pending set; the decision waits for full
+// stage resolution, matching the engine's recorded behavior (gh-82,
+// AUD-015): a stage that resolves all-Passed releases the next stage
+// under the same run id, or finishes the run with pipeline.finished
+// carrying `passed` when it was the last; a stage resolving Failed or
+// Errored ends the run with the run's worst status (AUD-010 ranking) and
+// no further stages. Unknown run ids and duplicate or stray jobs are
+// ignored — after a restart lost in-flight state there is nothing to
+// sequence. A stage-release publish failure returns the error and leaves
+// the entry unacknowledged; emission failures degrade.
+func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) error {
+	var (
+		pipeline string
+		finished string
+		release  []Assignment
+	)
+
+	m.mu.Lock()
+	r, ok := m.runs[runID]
+	if !ok || !r.pending[job] {
+		m.mu.Unlock()
+		return nil
+	}
+	delete(r.pending, job)
+	r.worst = worstStatus(r.worst, status)
+	if len(r.pending) == 0 {
+		pipeline = r.pipeline
+		if r.worst == StatusPassed {
+			if r.next < len(r.stages) {
+				release = r.stages[r.next]
+				r.next++
+				r.pending = jobNames(release)
+			} else {
+				finished = StatusPassed
+				delete(m.runs, runID)
+			}
+		} else {
+			finished = r.worst
+			delete(m.runs, runID)
+		}
+	}
+	m.mu.Unlock()
+
+	if finished != "" {
+		m.emitFinished(ctx, runID, pipeline, finished)
+		return nil
+	}
+	if release != nil {
+		return m.publishStage(ctx, release, runID)
+	}
+	return nil
+}
+
+// statusRank orders the job outcome slugs the machine sequences on,
+// following the dispatcher's ranking (AUD-010): Errored is worst, then
+// Failed; Passed is best.
+func statusRank(s string) int {
+	switch s {
+	case StatusErrored:
+		return 2
+	case StatusFailed:
+		return 1
+	}
+	return 0
+}
+
+// worstStatus returns whichever of a, b ranks worse per statusRank.
+func worstStatus(a, b string) string {
+	if statusRank(b) > statusRank(a) {
+		return b
+	}
+	return a
+}
+
+// emitFinished emits pipeline.finished for a resolved run. Degradation
+// policy applies: the run is already over, and emission failure must not
+// fail anything.
+func (m *Machine) emitFinished(ctx context.Context, runID, pipeline, status string) {
+	if err := m.events.Publish(ctx, Event{
+		Type:       EventPipelineFinished,
+		OccurredAt: time.Now(),
+		RunID:      runID,
+		Pipeline:   pipeline,
+		Payload:    map[string]string{"status": status},
+	}); err != nil {
+		// Degradation: never fail a run over emission. v1 has no logger;
+		// process bootstrap wires one.
+		_ = err
+	}
+}

@@ -43,7 +43,12 @@ func (j *journal) snapshot() []string {
 type fakeEvents struct{ j *journal }
 
 func (f fakeEvents) Publish(_ context.Context, e orchestrator.Event) error {
-	f.j.record("started:" + e.RunID)
+	switch e.Type {
+	case orchestrator.EventPipelineStarted:
+		f.j.record("started:" + e.RunID)
+	case orchestrator.EventPipelineFinished:
+		f.j.record("finished:" + e.RunID + ":" + e.Payload["status"])
+	}
 	if f.j.failEmit {
 		return errors.New("bus unreachable")
 	}
