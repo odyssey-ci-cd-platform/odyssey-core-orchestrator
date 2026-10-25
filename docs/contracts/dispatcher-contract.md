@@ -4,7 +4,7 @@
 - **Revision (2026-10-12, gh-9):** `origin` removed from the run request. The composer is a separate service (its own repo planned; services consolidate into a monorepo later): it consumes origin triggers and owns intake provenance — the orchestrator is origin-blind and never sees which surface produced a run. Nothing consumed the field; removal is safe. trigger_id stays as the composer's correlation/dedup handle.
 - **Binding for:** every message this repo publishes or consumes across the queue boundary.
 
-Two queues and one event bus bind this repo to the dispatcher repo. The event envelope itself is specified in the dispatcher repo (`internal/domain`, `Event`); this record fixes the queue messages and each side's emission responsibilities. Fields evolve additively only — consumers ignore unknown fields, producers never repurpose existing ones.
+Two queues and one event bus bind this repo to the dispatcher repo. The event envelope itself is specified in the dispatcher repo (`internal/domain`, `Event`); this record fixes the queue messages and each side's emission responsibilities. Fields evolve additively only — consumers ignore unknown fields, producers never repurpose existing ones. The JSON examples below are mirrored as golden fixtures under this repository's `testdata/`, pinned by exact round-trip tests (an unexpected key fails), and the composer and dispatcher repositories test their own wire code against the same files.
 
 ## Streams
 
@@ -54,6 +54,11 @@ ADR 0001's open question is settled here: the composer fetches the repository sh
       "setup": ["apk add git"],
       "env": { "KEY": "value" },
       "steps": [{ "name": "compile", "run": "make", "timeout_ms": 300000 }]
+    },
+    "unit": {
+      "stage": "test",
+      "image": "golang",
+      "steps": [{ "name": "unit", "run": "go test ./...", "timeout_ms": 600000 }]
     }
   }
 }

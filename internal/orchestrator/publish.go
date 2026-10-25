@@ -7,6 +7,8 @@ import (
 	"fmt"
 
 	"github.com/redis/go-redis/v9"
+
+	"github.com/odyssey-ci-cd-platform/odyssey-core-orchestrator/internal/pipeline"
 )
 
 const (
@@ -57,7 +59,11 @@ func (a Assignment) Validate() error {
 	if a.Source.Commit == "" {
 		errs = append(errs, errors.New("source.commit must not be empty"))
 	}
-	if err := a.JobSpec.Validate(a.Job); err != nil {
+	// The spec rides without its stage (contract § Job assignment); the
+	// envelope's stage is re-attached so the shared config rule set applies
+	// unchanged.
+	spec := pipeline.Job{Stage: a.Stage, Image: a.JobSpec.Image, Setup: a.JobSpec.Setup, Env: a.JobSpec.Env, Steps: a.JobSpec.Steps}
+	if err := spec.Validate(a.Job); err != nil {
 		errs = append(errs, err)
 	}
 	return errors.Join(errs...)

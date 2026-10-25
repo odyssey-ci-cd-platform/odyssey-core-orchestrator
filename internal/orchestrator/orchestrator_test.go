@@ -212,6 +212,12 @@ func TestSegmentMarshalsContractShape(t *testing.T) {
 			t.Errorf("job_spec missing %q: %s", key, raw)
 		}
 	}
+	// The job's name and stage ride the envelope, not the spec (contract
+	// § Job assignment) — the exact-fixture test in contract_test.go pins
+	// the whole shape; this asserts the one key at the Segment site.
+	if _, ok := jobSpec["stage"]; ok {
+		t.Errorf("job_spec carries stage: %s", raw)
+	}
 }
 
 // Segment order is deterministic: declared stage order, jobs sorted by
