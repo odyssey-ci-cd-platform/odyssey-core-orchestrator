@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,6 +28,12 @@ type Machine struct {
 	assignments AssignmentSink
 	log         Logger
 	runs        map[string]*run
+
+	// lastReleaseNanos records how long the most recent successful stage
+	// release took to publish, for metrics (AUD-013); zero until one has
+	// happened. Atomic: written by whichever loop's JobFinished released,
+	// read by the metrics scraper.
+	lastReleaseNanos atomic.Int64
 
 	// Deadline is a run's maximum lifetime, measured from Start to
 	// resolution. A run whose outcome has not arrived when the deadline
@@ -77,6 +84,12 @@ func NewMachine(events EventSink, assignments AssignmentSink, log Logger) *Machi
 		ReapInterval: 30 * time.Second,
 		Clock:        time.Now,
 	}
+}
+
+// LastReleaseLatency is how long the most recent successful stage release
+// took to publish (zero before one has happened).
+func (m *Machine) LastReleaseLatency() time.Duration {
+	return time.Duration(m.lastReleaseNanos.Load())
 }
 
 // Start hands off one segmented run: pipeline.started first — the results
@@ -300,6 +313,7 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job string, attempt in
 	if release == nil {
 		return nil
 	}
+	started := time.Now()
 	if err := m.publishStage(ctx, release, runID); err != nil {
 		m.mu.Lock()
 		if r, ok := m.runs[runID]; ok {
@@ -314,6 +328,7 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job string, attempt in
 		m.mu.Unlock()
 		return err
 	}
+	m.lastReleaseNanos.Store(int64(time.Since(started)))
 	return nil
 }
 

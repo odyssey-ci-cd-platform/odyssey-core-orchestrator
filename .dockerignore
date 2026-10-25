@@ -1,0 +1,12 @@
+# The image builds the binary; tests, fixtures, and repo plumbing stay out
+# of the context.
+.git
+.github
+.worktrees
+audit
+docs
+scripts
+testdata
+README.md
+RUNBOOK.md
+CHANGELOG.md

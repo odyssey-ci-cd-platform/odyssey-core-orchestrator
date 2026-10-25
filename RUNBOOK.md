@@ -20,6 +20,20 @@ Operational procedures, incidents, and the recorded baseline. Update in the same
 
 Run `.agents/bin/check-docs.sh` before committing Markdown changes; CI runs it against `origin/main`. It cannot prove changelog coverage — that stays a discipline.
 
+### 1.4 Running the orchestrator
+
+- Build: `go build ./cmd/orchestrator` (with `GOTOOLCHAIN=auto` — go.mod pins the 1.26.10 floor).
+- Required env: `ODYSSEY_REDIS_ADDR` (default `localhost:6379`) — the queue/bus Redis, `host:port`.
+- Optional env: `ODYSSEY_HEALTH_ADDR` (default `127.0.0.1:8080`, the health/metrics listen address), `ODYSSEY_JOBS_MAXLEN` (default 100,000) and `ODYSSEY_DEAD_MAXLEN` (default 1,000) — the contract's deployment-overridable queue trims.
+- Stream names are pinned by the dispatcher contract (§ Streams) and are deliberately not configurable; a bad env value fails startup with the violated rule in one joined error.
+- Single instance: the process takes the `odyssey:orchestrator-lease` Redis key (`SET NX PX` 15s, renewed every 5s) before serving; a second instance exits non-zero immediately, and an unreachable Redis also exits non-zero for the deployment's restart policy to retry.
+- If the lease is lost mid-run (expired or taken over), the process logs an error and `/healthz` serves 503 while it keeps its in-memory runs — the v1 limit is that it serves degraded until restarted, never two healthy holders.
+- Transient Redis errors around the loops' reads retry in process with bounded backoff (100ms doubling to a 2s cap); a failed decision (hand-off, stage release, or its ack) exits the loop so the entry stays pending for the next start's pending-entry recovery.
+- Shutdown: SIGINT/SIGTERM cancel both loops and the lease renewer; reads unblock within the 1s block interval, the lease is released, and the exit is clean unless a loop failed first.
+- Observability: `/healthz` serves 200 with the lease held and 503 without it, carrying each loop's last serve error and its time; `/debug/vars` carries `orchestrator_inflight_runs`, `orchestrator_pending_pipeline_requests`, `orchestrator_pending_events`, and `orchestrator_last_stage_release_ms`.
+- Smoke: `scripts/e2e-orchestrator.sh` runs the whole flow against a live Redis it spawns (needs docker and go) and asserts the lease rejects a second instance.
+- Image: `docker build -t orchestrator .` produces the distroless static image; the container takes the same env (see the Dockerfile).
+
 ## 2. Maintenance tasks
 
 - Run-deadline defaults (gh-25, AUD-003): a run whose outcome has not arrived resolves as `errored` at a per-run deadline of **1h** (set in `NewMachine`, overridable at construction; zero or less disables); the reaper scans every **30s** (`ReapInterval`, non-positive disables the ticker). Both are deployment-relevant defaults sized before any load data — revisit them from measured run durations, not taste.

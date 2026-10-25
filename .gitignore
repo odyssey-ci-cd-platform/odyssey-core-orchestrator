@@ -10,3 +10,7 @@ gates.json
 # Audit-effort scratch (issue bodies, tmux state) and parallel worktrees.
 .audit-work/
 .worktrees/
+
+# e2e smoke build artifact and its log (scripts/e2e-orchestrator.sh cleans up,
+# but a failed run must not dirty the tree).
+.e2e-*

@@ -26,9 +26,10 @@ const (
 	// history. A deployment config may override the default.
 	MaxStreamLen = 100000
 
-	// maxDeadLen bounds retention on the dead stream (contract § Delivery
-	// parameters): an inspection queue, small by design.
-	maxDeadLen = 1000
+	// MaxDeadLen bounds retention on the dead stream (contract § Delivery
+	// parameters): an inspection queue, small by design. A deployment
+	// config may override the default.
+	MaxDeadLen = 1000
 )
 
 // Dead-letter reasons (contract § Run request: the dead-letter wrap's
@@ -57,11 +58,17 @@ type DeadLetter struct {
 // Publisher writes job assignments onto the job queue.
 type Publisher struct {
 	client redis.UniversalClient
+
+	// MaxLen trims the job queue and MaxDeadLen the dead-letter queue
+	// via approximate XADD trimming; NewPublisher sets the contract's
+	// v1 defaults. A deployment config may override both.
+	MaxLen     int64
+	MaxDeadLen int64
 }
 
 // NewPublisher returns a Publisher issuing XADDs through client.
 func NewPublisher(client redis.UniversalClient) *Publisher {
-	return &Publisher{client: client}
+	return &Publisher{client: client, MaxLen: MaxStreamLen, MaxDeadLen: MaxDeadLen}
 }
 
 // Validate enforces the contract's § Job assignment field rules — the same
@@ -115,7 +122,7 @@ func (p *Publisher) Publish(ctx context.Context, a Assignment) error {
 	}
 	return p.client.XAdd(ctx, &redis.XAddArgs{
 		Stream: StreamJobs,
-		MaxLen: MaxStreamLen,
+		MaxLen: p.MaxLen,
 		Approx: true,
 		Values: map[string]any{"envelope": string(body)},
 	}).Err()
@@ -131,7 +138,7 @@ func (p *Publisher) PublishDeadLetter(ctx context.Context, d DeadLetter) error {
 	}
 	return p.client.XAdd(ctx, &redis.XAddArgs{
 		Stream: StreamPipelineRequestsDead,
-		MaxLen: maxDeadLen,
+		MaxLen: p.MaxDeadLen,
 		Approx: true,
 		Values: map[string]any{"envelope": string(body)},
 	}).Err()
