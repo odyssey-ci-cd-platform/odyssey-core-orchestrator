@@ -27,17 +27,38 @@ type Machine struct {
 	assignments AssignmentSink
 	log         Logger
 	runs        map[string]*run
+
+	// Deadline is a run's maximum lifetime, measured from Start to
+	// resolution. A run whose outcome has not arrived when the deadline
+	// passes resolves as errored and is evicted (Reap, AUD-003): the event
+	// bus is lossy and never replayed, so the deadline is the bound on a
+	// lost job.finished. Zero or negative disables deadline reaping.
+	// NewMachine sets a generous default; a deployment config may override
+	// it.
+	Deadline time.Duration
+
+	// ReapInterval is how often RunReaper scans the run table. Zero or
+	// negative leaves reaping to explicit Reap calls. NewMachine sets a
+	// default; a deployment config may override it.
+	ReapInterval time.Duration
+
+	// Clock is the reaper's time source; NewMachine sets time.Now. Tests
+	// inject a fake to advance time without sleeping.
+	Clock func() time.Time
 }
 
 // run is one in-flight pipeline run: its stages grouped in declared order,
 // the index of the next stage to release, the current stage's unfinished
-// job names, and the worst job outcome resolved so far.
+// job names with the attempt each was published under, the worst job
+// outcome resolved so far, and when the run started (the reaper's deadline
+// anchor).
 type run struct {
-	pipeline string
-	stages   [][]Assignment
-	next     int
-	pending  map[string]bool
-	worst    string
+	pipeline  string
+	stages    [][]Assignment
+	next      int
+	pending   map[string]int
+	worst     string
+	startedAt time.Time
 }
 
 // NewMachine returns a Machine emitting through events, publishing
@@ -47,7 +68,15 @@ func NewMachine(events EventSink, assignments AssignmentSink, log Logger) *Machi
 	if log == nil {
 		log = discardLogger{}
 	}
-	return &Machine{events: events, assignments: assignments, log: log, runs: make(map[string]*run)}
+	return &Machine{
+		events:       events,
+		assignments:  assignments,
+		log:          log,
+		runs:         make(map[string]*run),
+		Deadline:     time.Hour,
+		ReapInterval: 30 * time.Second,
+		Clock:        time.Now,
+	}
 }
 
 // Start hands off one segmented run: pipeline.started first — the results
@@ -76,11 +105,12 @@ func (m *Machine) Start(ctx context.Context, runID, pipeline string, assignments
 	}
 
 	r := &run{
-		pipeline: pipeline,
-		stages:   stages,
-		next:     1,
-		pending:  jobNames(stages[0]),
-		worst:    StatusPassed,
+		pipeline:  pipeline,
+		stages:    stages,
+		next:      1,
+		pending:   jobAttempts(stages[0]),
+		worst:     StatusPassed,
+		startedAt: m.Clock(),
 	}
 	m.mu.Lock()
 	m.runs[runID] = r
@@ -105,6 +135,68 @@ func (m *Machine) publishStage(ctx context.Context, stage []Assignment, runID st
 	return nil
 }
 
+// InFlightRuns reports how many runs the machine currently tracks —
+// started but unresolved (gh-25, AUD-013's observability ask). The count
+// covers runs awaiting outcomes and runs awaiting their deadline; gh-24's
+// wiring reads it for metrics/health. This method is the whole seam — no
+// HTTP or metrics code lives here.
+func (m *Machine) InFlightRuns() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.runs)
+}
+
+// Reap resolves every tracked run whose deadline has passed: it ends the
+// run with pipeline.finished carrying errored and evicts it (AUD-003) —
+// a lost or delayed job.finished delays a run's resolution but cannot
+// hang it. Eviction commits before the emission, so an emission failure
+// (which degrades, never fails) cannot strand the resolved run back into
+// the table. A deadline of zero or less disables reaping.
+func (m *Machine) Reap(ctx context.Context) {
+	if m.Deadline <= 0 {
+		return
+	}
+	type expired struct {
+		id, pipeline string
+	}
+	var overdue []expired
+
+	m.mu.Lock()
+	now := m.Clock()
+	for id, r := range m.runs {
+		if now.Sub(r.startedAt) >= m.Deadline {
+			overdue = append(overdue, expired{id: id, pipeline: r.pipeline})
+			delete(m.runs, id)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, e := range overdue {
+		m.log.Warn("run deadline exceeded", "run_id", e.id, "deadline", m.Deadline.String())
+		m.emitFinished(ctx, e.id, e.pipeline, StatusErrored)
+	}
+}
+
+// RunReaper scans the run table every ReapInterval until ctx is cancelled
+// (returning nil), applying the deadline (Reap). It serves beside the two
+// queue loops; a non-positive interval returns immediately, leaving
+// reaping to explicit Reap calls.
+func (m *Machine) RunReaper(ctx context.Context) error {
+	if m.ReapInterval <= 0 {
+		return nil
+	}
+	ticker := time.NewTicker(m.ReapInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			m.Reap(ctx)
+		}
+	}
+}
+
 // groupByStage splits a stage-ordered assignment slice into per-stage
 // groups. Segment orders assignments by declared stage, so grouping is
 // consecutive.
@@ -120,13 +212,15 @@ func groupByStage(assignments []Assignment) [][]Assignment {
 	return stages
 }
 
-// jobNames extracts a stage's job names into a set.
-func jobNames(stage []Assignment) map[string]bool {
-	names := make(map[string]bool, len(stage))
+// jobAttempts maps a stage's job names to the attempt each assignment was
+// published under (Segment publishes 1; the dispatcher increments on
+// reclaim).
+func jobAttempts(stage []Assignment) map[string]int {
+	attempts := make(map[string]int, len(stage))
 	for _, a := range stage {
-		names[a.Job] = true
+		attempts[a.Job] = a.Attempt
 	}
-	return names
+	return attempts
 }
 
 // JobFinished applies one dispatcher job outcome to its run. The job
@@ -140,6 +234,14 @@ func jobNames(stage []Assignment) map[string]bool {
 // ignored — after a restart lost in-flight state there is nothing to
 // sequence.
 //
+// Attempt (AUD-004, pending contract revision): a job is pending at the
+// attempt this repo published it under (Segment publishes 1). A terminal
+// outcome whose attempt is at least the recorded one resolves the job —
+// an attempt above the recorded one is a reclaim re-execution's outcome
+// replacing the lost first attempt — and an outcome below the recorded
+// attempt is stale and ignored. The first accepted outcome wins: once the
+// job is resolved, later attempts of it are stray.
+//
 // A stage release publishes before it commits: when the publish fails,
 // the advance is rolled back — the triggering job returns to the pending
 // set — and the error surfaces, so the outcome's unacknowledged entry is
@@ -150,7 +252,7 @@ func jobNames(stage []Assignment) map[string]bool {
 // a recovering stage. A release that already succeeded stays idempotent:
 // the outcome's job is no longer pending, so a redelivered entry changes
 // nothing. Emission failures degrade.
-func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) error {
+func (m *Machine) JobFinished(ctx context.Context, runID, job string, attempt int, status string) error {
 	var (
 		pipeline string
 		finished string
@@ -159,7 +261,14 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 
 	m.mu.Lock()
 	r, ok := m.runs[runID]
-	if !ok || !r.pending[job] {
+	if !ok {
+		m.mu.Unlock()
+		return nil
+	}
+	recorded, ok := r.pending[job]
+	if !ok || attempt < recorded {
+		// Not pending, or an outcome of an attempt the job already
+		// superseded: nothing to sequence.
 		m.mu.Unlock()
 		return nil
 	}
@@ -172,7 +281,7 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 			if r.next < len(r.stages) {
 				release = r.stages[r.next]
 				r.next++
-				r.pending = jobNames(release)
+				r.pending = jobAttempts(release)
 			} else {
 				finished = StatusPassed
 				delete(m.runs, runID)
@@ -196,9 +305,10 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 		if r, ok := m.runs[runID]; ok {
 			// The stage never published; unwind the advance so the
 			// outcome can be re-applied. The decision emptied the
-			// pending set, so restoring it is the triggering job alone.
+			// pending set, so restoring it is the triggering job alone,
+			// at the attempt it was recorded under.
 			r.next--
-			r.pending = map[string]bool{job: true}
+			r.pending = map[string]int{job: recorded}
 			r.worst = prevWorst
 		}
 		m.mu.Unlock()
