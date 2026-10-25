@@ -78,6 +78,19 @@ type Loop struct {
 	Block time.Duration
 }
 
+// decisionError marks an error from applying a queue decision — a hand-off
+// or stage release that failed midway, or the ack that commits it. The
+// loop must exit so the entry stays pending and the next start's recovery
+// re-applies it (gh-20); retrying a decision in place would re-decide a
+// half-applied entry against a still-populated run table — a duplicate run
+// — where exiting lets the process's restart recover it cleanly. Read
+// errors are the opposite: retrying them in place preserves in-memory run
+// state a process restart would lose (AUD-007).
+type decisionError struct{ err error }
+
+func (e *decisionError) Error() string { return e.err.Error() }
+func (e *decisionError) Unwrap() error { return e.err }
+
 // NewLoop returns a Loop reading entries through client, handing runs off
 // to machine, dead-lettering poison entries through dead, and logging
 // degraded paths through log (a nil log discards).
@@ -90,11 +103,11 @@ func NewLoop(client redis.UniversalClient, machine *Machine, dead DeadLetterSink
 
 // recoverPending re-reads the consumer group's own pending entries
 // (XREADGROUP with ID 0) and runs each through apply, acknowledging the
-// entries that decide cleanly. Both loops call it once on start, so an
+// entries that decide cleanly. Both loops call it once per serve, so an
 // entry left unacknowledged — a hand-off that failed mid-publish, or a
 // dead process — is retried instead of stranding the run behind it
 // (AUD-001). An apply that fails again leaves the entry pending and
-// aborts the loop; the next start retries it.
+// surfaces as a decision error; the next start retries it.
 func recoverPending(ctx context.Context, client redis.UniversalClient, stream string, apply func(context.Context, any) error) error {
 	for {
 		read, err := client.XReadGroup(ctx, &redis.XReadGroupArgs{
@@ -115,10 +128,10 @@ func recoverPending(ctx context.Context, client redis.UniversalClient, stream st
 		for _, s := range read {
 			for _, msg := range s.Messages {
 				if err := apply(ctx, msg.Values["envelope"]); err != nil {
-					return err // stays pending; the next start retries it
+					return &decisionError{fmt.Errorf("re-applying pending entry on %s: %w", stream, err)} // stays pending; the next start retries it
 				}
 				if err := client.XAck(ctx, stream, group, msg.ID).Err(); err != nil {
-					return fmt.Errorf("acknowledging recovered entry on %s: %w", stream, err)
+					return &decisionError{fmt.Errorf("acknowledging recovered entry on %s: %w", stream, err)}
 				}
 			}
 		}
@@ -128,15 +141,41 @@ func recoverPending(ctx context.Context, client redis.UniversalClient, stream st
 	}
 }
 
-// Run serves the pipeline queue until ctx is cancelled. It returns nil on
-// cancellation and the first infrastructure error otherwise; a poison
-// entry is neither — it is dead-lettered with a reason, so one bad queue
-// entry cannot stop the runs behind it. On start the loop first recovers
-// its group's own unacknowledged entries (recoverPending).
+// Run serves the pipeline queue until ctx is cancelled, retrying transient
+// Redis errors around the reads with bounded backoff — a process exit
+// costs every in-memory run (ADR 0001, decision 6), so a blip must not
+// (AUD-007). A decision error still returns: the entry stays pending and
+// the next start's recovery re-applies it (gh-20). Cancellation returns
+// nil. A poison entry is neither — it is dead-lettered with a reason, so
+// one bad queue entry cannot stop the runs behind it. Each retry re-runs
+// the serve sequence below (ensure group, recover pending, read).
 func (l *Loop) Run(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return nil
 	}
+	for attempt := 0; ; attempt++ {
+		if ctx.Err() != nil {
+			return nil
+		}
+		err := l.serve(ctx)
+		if err == nil {
+			return nil
+		}
+		var decision *decisionError
+		if errors.As(err, &decision) {
+			return err
+		}
+		l.log.Warn("pipeline queue error; retrying", "err", err, "attempt", attempt)
+		if err := BackoffSleep(ctx, attempt); err != nil {
+			return nil
+		}
+	}
+}
+
+// serve runs one connected stretch of the pipeline queue: ensure the
+// consumer group, recover the group's own pending entries, then read new
+// entries until a cancellation, a read error, or a decision error.
+func (l *Loop) serve(ctx context.Context) error {
 	err := l.client.XGroupCreateMkStream(ctx, StreamPipelineRequests, group, "0").Err()
 	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
 		return fmt.Errorf("ensuring consumer group: %w", err)
@@ -168,10 +207,10 @@ func (l *Loop) Run(ctx context.Context) error {
 		for _, stream := range read {
 			for _, msg := range stream.Messages {
 				if err := l.handOff(ctx, msg.Values["envelope"]); err != nil {
-					return err // the entry stays pending; the next start's recovery retries it
+					return &decisionError{err} // the entry stays pending; the next start's recovery retries it
 				}
 				if err := l.client.XAck(ctx, StreamPipelineRequests, group, msg.ID).Err(); err != nil {
-					return fmt.Errorf("acknowledging entry: %w", err)
+					return &decisionError{fmt.Errorf("acknowledging entry: %w", err)}
 				}
 			}
 		}

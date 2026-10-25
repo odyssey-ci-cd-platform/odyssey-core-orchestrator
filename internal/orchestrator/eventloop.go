@@ -35,17 +35,45 @@ func NewEventLoop(client redis.UniversalClient, machine *Machine, log Logger) *E
 	return &EventLoop{client: client, machine: machine, log: log, Block: time.Second}
 }
 
-// Run serves the event bus until ctx is cancelled. The consumer group
-// starts at `$`: the bus keeps other producers' history, and runs cannot
-// predate this process — run ids are minted here — so replaying that
-// history would only feed the machine events for runs it never started.
-// On start the loop first recovers its group's own unacknowledged entries
-// (recoverPending), so an outcome left pending by a failed stage release
-// is re-applied.
+// Run serves the event bus until ctx is cancelled, retrying transient
+// Redis errors around the reads with bounded backoff — same contract as
+// the queue loop (AUD-007); a decision error still returns and
+// cancellation still returns nil. Each retry re-runs the serve sequence
+// below. The consumer group starts at `$`: the bus keeps other producers'
+// history, and replaying all of it on the very first start would only feed
+// the machine events for runs it never started. After a restart the group
+// resumes from its read position, so events for runs this process never
+// minted do arrive; the machine ignores outcomes for unknown run ids (a
+// restart loses in-flight state, ADR 0001), which makes the replay real
+// but harmless — the old "runs cannot predate this process" comment
+// overstated it.
 func (l *EventLoop) Run(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return nil
 	}
+	for attempt := 0; ; attempt++ {
+		if ctx.Err() != nil {
+			return nil
+		}
+		err := l.serve(ctx)
+		if err == nil {
+			return nil
+		}
+		var decision *decisionError
+		if errors.As(err, &decision) {
+			return err
+		}
+		l.log.Warn("event bus error; retrying", "err", err, "attempt", attempt)
+		if err := BackoffSleep(ctx, attempt); err != nil {
+			return nil
+		}
+	}
+}
+
+// serve runs one connected stretch of the event bus: ensure the consumer
+// group, recover the group's own pending entries, then read new entries
+// until a cancellation, a read error, or a decision error.
+func (l *EventLoop) serve(ctx context.Context) error {
 	err := l.client.XGroupCreateMkStream(ctx, StreamEvents, group, "$").Err()
 	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
 		return fmt.Errorf("ensuring event consumer group: %w", err)
@@ -77,10 +105,10 @@ func (l *EventLoop) Run(ctx context.Context) error {
 		for _, stream := range read {
 			for _, msg := range stream.Messages {
 				if err := l.apply(ctx, msg.Values["envelope"]); err != nil {
-					return err // the entry stays pending; the next start's recovery re-applies it
+					return &decisionError{err} // the entry stays pending; the next start's recovery re-applies it
 				}
 				if err := l.client.XAck(ctx, StreamEvents, group, msg.ID).Err(); err != nil {
-					return fmt.Errorf("acknowledging event: %w", err)
+					return &decisionError{fmt.Errorf("acknowledging event: %w", err)}
 				}
 			}
 		}

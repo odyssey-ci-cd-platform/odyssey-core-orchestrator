@@ -11,7 +11,9 @@ import (
 	"os"
 	"os/signal"
 	"sync"
+	"sync/atomic"
 	"syscall"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 
@@ -26,6 +28,35 @@ type runner interface {
 func main() {
 	if err := run(os.Getenv, os.Stderr); err != nil {
 		os.Exit(1)
+	}
+}
+
+// renewLease keeps the single-instance lease held on its tick. A lost
+// lease does not kill the process — in-memory runs would die with it —
+// but it is logged and recorded so health can report it (the v1 limit
+// RUNBOOK documents).
+func renewLease(ctx context.Context, lease *orchestrator.Lease, wasLost func() bool, setLost func(bool), log *slog.Logger) {
+	ticker := time.NewTicker(orchestrator.LeaseRenewEvery)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			held, err := lease.Renew(ctx)
+			if err != nil {
+				log.Error("lease renewal failed", "err", err)
+				continue
+			}
+			if held {
+				setLost(false)
+				continue
+			}
+			if !wasLost() {
+				log.Error("orchestrator lease lost: the key expired or changed hands; serving degraded until restarted")
+			}
+			setLost(true)
+		}
 	}
 }
 
@@ -45,6 +76,23 @@ func run(getenv func(string) string, stderr io.Writer) error {
 
 	rdb := redis.NewClient(&redis.Options{Addr: cfg.RedisAddr})
 	defer func() { _ = rdb.Close() }()
+
+	// Single-instance lease (AUD-007): without it, a second replica would
+	// split the consumer groups across processes that each know only their
+	// own runs. Fail fast — including on an unreachable Redis — and let
+	// the deployment's restart policy retry, rather than half-serve.
+	lease, err := orchestrator.AcquireLease(ctx, rdb)
+	if err != nil {
+		log.Error("cannot take the orchestrator lease", "err", err)
+		return err
+	}
+	defer func() {
+		releaseCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		lease.Release(releaseCtx) // the signal context is already cancelled by now
+	}()
+	var leaseLost atomic.Bool
+	go renewLease(ctx, lease, leaseLost.Load, func(b bool) { leaseLost.Store(b) }, log)
 
 	publisher := orchestrator.NewPublisher(rdb)
 	publisher.MaxLen = cfg.JobsMaxLen
