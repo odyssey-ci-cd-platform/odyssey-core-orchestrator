@@ -29,7 +29,7 @@ func startLoops(t *testing.T, j *journal) (*redis.Client, func()) {
 	t.Cleanup(func() { _ = client.Close() })
 
 	machine := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
-	loop := orchestrator.NewLoop(client, machine)
+	loop := orchestrator.NewLoop(client, machine, nil, nil)
 	loop.Block = 25 * time.Millisecond
 	eventLoop := orchestrator.NewEventLoop(client, machine, nil)
 	eventLoop.Block = 25 * time.Millisecond

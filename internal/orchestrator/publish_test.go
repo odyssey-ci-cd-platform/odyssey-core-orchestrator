@@ -1,6 +1,7 @@
 package orchestrator_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"reflect"
@@ -109,6 +110,66 @@ func TestPublishRefusesInvalidAssignment(t *testing.T) {
 			}
 			if envelopes := jobQueueEntries(t, client); len(envelopes) != 0 {
 				t.Errorf("stream has %d entries, want 0 (refused, not enqueued)", len(envelopes))
+			}
+		})
+	}
+}
+
+// mustCompact compacts s into canonical wire JSON — the marshaler embeds
+// RawMessage compacted, insignificant whitespace apart.
+func mustCompact(t *testing.T, s string) json.RawMessage {
+	t.Helper()
+	var buf bytes.Buffer
+	if err := json.Compact(&buf, []byte(s)); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// The dead-letter wrap rides the wire in the contract's shape — reason
+// plus the original, embedded as `request` when the envelope was JSON and
+// as `raw` when it was not (dispatcher contract § Run request). Note:
+// written after PublishDeadLetter shipped; the dead-letter behavior
+// itself went red-first in TestLoopDeadLettersPoisonEntries.
+func TestPublishDeadLetterWritesWrap(t *testing.T) {
+	cases := []struct {
+		name string
+		want orchestrator.DeadLetter
+	}{
+		{
+			"validation wraps the original envelope",
+			orchestrator.DeadLetter{Reason: orchestrator.DeadReasonValidation, Request: mustCompact(t, validEnvelope)},
+		},
+		{
+			"decode wraps the raw bytes",
+			orchestrator.DeadLetter{Reason: orchestrator.DeadReasonDecode, Raw: "not json {{"},
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			pub, client := newTestPublisher(t)
+
+			if err := pub.PublishDeadLetter(context.Background(), tt.want); err != nil {
+				t.Fatalf("PublishDeadLetter() error = %v, want nil", err)
+			}
+
+			entries, err := client.XRange(context.Background(), orchestrator.StreamPipelineRequestsDead, "-", "+").Result()
+			if err != nil {
+				t.Fatalf("XRange() error = %v", err)
+			}
+			if len(entries) != 1 {
+				t.Fatalf("stream has %d entries, want 1", len(entries))
+			}
+			body, ok := entries[0].Values["envelope"].(string)
+			if !ok {
+				t.Fatalf("entry values = %v, want an envelope string", entries[0].Values)
+			}
+			var got orchestrator.DeadLetter
+			if err := json.Unmarshal([]byte(body), &got); err != nil {
+				t.Fatalf("envelope is not dead-letter JSON: %v\n%s", err, body)
+			}
+			if !reflect.DeepEqual(got, tt.want) {
+				t.Errorf("wrap = %+v, want %+v (wire round-trip)", got, tt.want)
 			}
 		})
 	}
