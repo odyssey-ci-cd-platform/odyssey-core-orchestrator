@@ -3,6 +3,7 @@ package orchestrator_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -62,13 +63,57 @@ func (f fakeAssignments) Publish(_ context.Context, a orchestrator.Assignment) e
 	return nil
 }
 
+// fakeLogger records the degraded-path log lines as "level:msg k=v …"
+// strings, so tests assert what a degraded path made visible.
+type fakeLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *fakeLogger) Warn(msg string, args ...any)  { l.record("warn", msg, args) }
+func (l *fakeLogger) Error(msg string, args ...any) { l.record("error", msg, args) }
+
+func (l *fakeLogger) record(level, msg string, args []any) {
+	line := level + ":" + msg
+	for i := 0; i+1 < len(args); i += 2 {
+		line += fmt.Sprintf(" %v=%v", args[i], args[i+1])
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, line)
+}
+
+func (l *fakeLogger) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
+}
+
+// hasLog fails the test unless some recorded line contains every fragment.
+func hasLog(t *testing.T, l *fakeLogger, fragments ...string) {
+	t.Helper()
+	for _, line := range l.snapshot() {
+		all := true
+		for _, f := range fragments {
+			if !strings.Contains(line, f) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return
+		}
+	}
+	t.Errorf("no log line contains %v; lines = %v", fragments, l.snapshot())
+}
+
 func newTestLoop(t *testing.T, j *journal) (*orchestrator.Loop, *redis.Client, context.CancelFunc, <-chan error) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	loop := orchestrator.NewLoop(client, orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}))
+	loop := orchestrator.NewLoop(client, orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil))
 	loop.Block = 25 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -251,7 +296,7 @@ func TestLoopStopsWhenContextCancelledBeforeStart(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	loop := orchestrator.NewLoop(client, orchestrator.NewMachine(fakeEvents{&journal{}}, fakeAssignments{&journal{}}))
+	loop := orchestrator.NewLoop(client, orchestrator.NewMachine(fakeEvents{&journal{}}, fakeAssignments{&journal{}}, nil))
 	loop.Block = 25 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())

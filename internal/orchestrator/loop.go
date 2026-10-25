@@ -38,6 +38,21 @@ type AssignmentSink interface {
 	Publish(ctx context.Context, a Assignment) error
 }
 
+// Logger is where degraded paths leave a trace: emission failures, poison
+// entries, failed dead-letter writes. The consumer package owns the seam;
+// *slog.Logger satisfies it.
+type Logger interface {
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}
+
+// discardLogger drops every line — the nil-logger default, so a caller
+// without logging wiring degrades instead of panicking.
+type discardLogger struct{}
+
+func (discardLogger) Warn(string, ...any)  {}
+func (discardLogger) Error(string, ...any) {}
+
 // Loop consumes run requests from the pipeline queue and hands each off to
 // the machine, which sequences the run's stages. It holds no run state:
 // every entry is one decode-validate-segment, and the queue's consumer
