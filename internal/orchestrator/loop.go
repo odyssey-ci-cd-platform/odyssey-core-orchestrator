@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -63,6 +64,31 @@ type discardLogger struct{}
 func (discardLogger) Warn(string, ...any)  {}
 func (discardLogger) Error(string, ...any) {}
 
+// LoopStatus records a loop's most recent serve error for the health
+// endpoint (AUD-013): a transient error the loop retried through never
+// reaches the caller, so this is the only trace besides the log line.
+type LoopStatus struct {
+	mu  sync.Mutex
+	err string
+	at  time.Time
+}
+
+// Record notes the loop's most recent serve error and when it was seen.
+func (s *LoopStatus) Record(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.err = err.Error()
+	s.at = time.Now()
+}
+
+// LastError returns the recorded error and when it was seen; empty and
+// zero when the loop has served cleanly.
+func (s *LoopStatus) LastError() (string, time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.err, s.at
+}
+
 // Loop consumes run requests from the pipeline queue and hands each off to
 // the machine, which sequences the run's stages. It holds no run state:
 // every entry is one decode-validate-segment, and the queue's consumer
@@ -72,6 +98,10 @@ type Loop struct {
 	machine *Machine
 	dead    DeadLetterSink
 	log     Logger
+
+	// Status records the loop's last serve error for health (AUD-013);
+	// NewLoop provides a fresh one.
+	Status *LoopStatus
 
 	// Block is the XREADGROUP block interval; NewLoop sets a default. A
 	// deployment config may override it.
@@ -98,7 +128,7 @@ func NewLoop(client redis.UniversalClient, machine *Machine, dead DeadLetterSink
 	if log == nil {
 		log = discardLogger{}
 	}
-	return &Loop{client: client, machine: machine, dead: dead, log: log, Block: time.Second}
+	return &Loop{client: client, machine: machine, dead: dead, log: log, Status: &LoopStatus{}, Block: time.Second}
 }
 
 // recoverPending re-reads the consumer group's own pending entries
@@ -161,6 +191,7 @@ func (l *Loop) Run(ctx context.Context) error {
 		if err == nil {
 			return nil
 		}
+		l.Status.Record(err)
 		var decision *decisionError
 		if errors.As(err, &decision) {
 			return err

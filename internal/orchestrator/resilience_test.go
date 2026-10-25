@@ -64,6 +64,15 @@ func TestLoopRetriesTransientReadErrors(t *testing.T) {
 	waitFor(t, j, 2) // started + first stage
 	waitAcked(t, client, orchestrator.StreamPipelineRequests)
 
+	// The transient error is visible to health, not just the log.
+	err, at := loop.Status.LastError()
+	if err == "" {
+		t.Error("Status.LastError() is empty after a transient read error, want the recorded error")
+	}
+	if at.IsZero() {
+		t.Error("Status.LastError() timestamp is zero after a transient read error, want the time it was seen")
+	}
+
 	cancel()
 	select {
 	case err := <-done:

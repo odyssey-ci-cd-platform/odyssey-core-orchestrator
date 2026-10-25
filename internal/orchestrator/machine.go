@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -27,6 +28,12 @@ type Machine struct {
 	assignments AssignmentSink
 	log         Logger
 	runs        map[string]*run
+
+	// lastReleaseNanos records how long the most recent successful stage
+	// release took to publish, for metrics (AUD-013); zero until one has
+	// happened. Atomic: written by whichever loop's JobFinished released,
+	// read by the metrics scraper.
+	lastReleaseNanos atomic.Int64
 }
 
 // run is one in-flight pipeline run: its stages grouped in declared order,
@@ -48,6 +55,20 @@ func NewMachine(events EventSink, assignments AssignmentSink, log Logger) *Machi
 		log = discardLogger{}
 	}
 	return &Machine{events: events, assignments: assignments, log: log, runs: make(map[string]*run)}
+}
+
+// InFlight counts the runs currently being sequenced — the metric that
+// tells a wedged machine from an idle one (AUD-013).
+func (m *Machine) InFlight() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.runs)
+}
+
+// LastReleaseLatency is how long the most recent successful stage release
+// took to publish (zero before one has happened).
+func (m *Machine) LastReleaseLatency() time.Duration {
+	return time.Duration(m.lastReleaseNanos.Load())
 }
 
 // Start hands off one segmented run: pipeline.started first — the results
@@ -191,6 +212,7 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 	if release == nil {
 		return nil
 	}
+	started := time.Now()
 	if err := m.publishStage(ctx, release, runID); err != nil {
 		m.mu.Lock()
 		if r, ok := m.runs[runID]; ok {
@@ -204,6 +226,7 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 		m.mu.Unlock()
 		return err
 	}
+	m.lastReleaseNanos.Store(int64(time.Since(started)))
 	return nil
 }
 

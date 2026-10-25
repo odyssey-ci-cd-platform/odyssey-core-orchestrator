@@ -20,6 +20,10 @@ type EventLoop struct {
 	machine *Machine
 	log     Logger
 
+	// Status records the loop's last serve error for health (AUD-013);
+	// NewEventLoop provides a fresh one.
+	Status *LoopStatus
+
 	// Block is the XREADGROUP block interval; NewEventLoop sets a default.
 	// A deployment config may override it.
 	Block time.Duration
@@ -32,7 +36,7 @@ func NewEventLoop(client redis.UniversalClient, machine *Machine, log Logger) *E
 	if log == nil {
 		log = discardLogger{}
 	}
-	return &EventLoop{client: client, machine: machine, log: log, Block: time.Second}
+	return &EventLoop{client: client, machine: machine, log: log, Status: &LoopStatus{}, Block: time.Second}
 }
 
 // Run serves the event bus until ctx is cancelled, retrying transient
@@ -59,6 +63,7 @@ func (l *EventLoop) Run(ctx context.Context) error {
 		if err == nil {
 			return nil
 		}
+		l.Status.Record(err)
 		var decision *decisionError
 		if errors.As(err, &decision) {
 			return err

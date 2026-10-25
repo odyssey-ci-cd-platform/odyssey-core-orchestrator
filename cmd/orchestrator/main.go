@@ -5,9 +5,12 @@ package main
 
 import (
 	"context"
+	"expvar"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"sync"
@@ -100,6 +103,36 @@ func run(getenv func(string) string, stderr io.Writer) error {
 	machine := orchestrator.NewMachine(orchestrator.NewEmitter(rdb), publisher, log)
 	queueLoop := orchestrator.NewLoop(rdb, machine, publisher, log)
 	eventLoop := orchestrator.NewEventLoop(rdb, machine, log)
+
+	// Observability (AUD-013): /healthz and /debug/vars on one small
+	// server. A listen failure is a configuration error — fail startup.
+	healthLn, err := net.Listen("tcp", cfg.HealthAddr)
+	if err != nil {
+		log.Error("cannot listen for health/metrics", "addr", cfg.HealthAddr, "err", err)
+		return err
+	}
+	healthMux := http.NewServeMux()
+	healthMux.Handle("/healthz", &Health{
+		LeaseLost: leaseLost.Load,
+		Loops: map[string]*orchestrator.LoopStatus{
+			"pipeline_queue": queueLoop.Status,
+			"event_bus":      eventLoop.Status,
+		},
+	})
+	healthMux.Handle("/debug/vars", expvar.Handler())
+	registerMetrics(machine, rdb)
+	healthSrv := &http.Server{Handler: healthMux, ReadHeaderTimeout: 5 * time.Second}
+	go func() {
+		if err := healthSrv.Serve(healthLn); err != nil && err != http.ErrServerClosed {
+			log.Error("health server failed", "err", err)
+		}
+	}()
+	defer func() {
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = healthSrv.Shutdown(shutdownCtx)
+	}()
+	log.Info("orchestrator serving", "redis", cfg.RedisAddr, "health", cfg.HealthAddr)
 
 	errs := make(chan error, 2)
 	var wg sync.WaitGroup
