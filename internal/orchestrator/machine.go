@@ -27,17 +27,37 @@ type Machine struct {
 	assignments AssignmentSink
 	log         Logger
 	runs        map[string]*run
+
+	// Deadline is a run's maximum lifetime, measured from Start to
+	// resolution. A run whose outcome has not arrived when the deadline
+	// passes resolves as errored and is evicted (Reap, AUD-003): the event
+	// bus is lossy and never replayed, so the deadline is the bound on a
+	// lost job.finished. Zero or negative disables deadline reaping.
+	// NewMachine sets a generous default; a deployment config may override
+	// it.
+	Deadline time.Duration
+
+	// ReapInterval is how often RunReaper scans the run table. Zero or
+	// negative leaves reaping to explicit Reap calls. NewMachine sets a
+	// default; a deployment config may override it.
+	ReapInterval time.Duration
+
+	// Clock is the reaper's time source; NewMachine sets time.Now. Tests
+	// inject a fake to advance time without sleeping.
+	Clock func() time.Time
 }
 
 // run is one in-flight pipeline run: its stages grouped in declared order,
 // the index of the next stage to release, the current stage's unfinished
-// job names, and the worst job outcome resolved so far.
+// job names, the worst job outcome resolved so far, and when the run
+// started (the reaper's deadline anchor).
 type run struct {
-	pipeline string
-	stages   [][]Assignment
-	next     int
-	pending  map[string]bool
-	worst    string
+	pipeline  string
+	stages    [][]Assignment
+	next      int
+	pending   map[string]bool
+	worst     string
+	startedAt time.Time
 }
 
 // NewMachine returns a Machine emitting through events, publishing
@@ -47,7 +67,15 @@ func NewMachine(events EventSink, assignments AssignmentSink, log Logger) *Machi
 	if log == nil {
 		log = discardLogger{}
 	}
-	return &Machine{events: events, assignments: assignments, log: log, runs: make(map[string]*run)}
+	return &Machine{
+		events:       events,
+		assignments:  assignments,
+		log:          log,
+		runs:         make(map[string]*run),
+		Deadline:     time.Hour,
+		ReapInterval: 30 * time.Second,
+		Clock:        time.Now,
+	}
 }
 
 // Start hands off one segmented run: pipeline.started first — the results
@@ -76,11 +104,12 @@ func (m *Machine) Start(ctx context.Context, runID, pipeline string, assignments
 	}
 
 	r := &run{
-		pipeline: pipeline,
-		stages:   stages,
-		next:     1,
-		pending:  jobNames(stages[0]),
-		worst:    StatusPassed,
+		pipeline:  pipeline,
+		stages:    stages,
+		next:      1,
+		pending:   jobNames(stages[0]),
+		worst:     StatusPassed,
+		startedAt: m.Clock(),
 	}
 	m.mu.Lock()
 	m.runs[runID] = r
@@ -103,6 +132,57 @@ func (m *Machine) publishStage(ctx context.Context, stage []Assignment, runID st
 		}
 	}
 	return nil
+}
+
+// Reap resolves every tracked run whose deadline has passed: it ends the
+// run with pipeline.finished carrying errored and evicts it (AUD-003) —
+// a lost or delayed job.finished delays a run's resolution but cannot
+// hang it. Eviction commits before the emission, so an emission failure
+// (which degrades, never fails) cannot strand the resolved run back into
+// the table. A deadline of zero or less disables reaping.
+func (m *Machine) Reap(ctx context.Context) {
+	if m.Deadline <= 0 {
+		return
+	}
+	type expired struct {
+		id, pipeline string
+	}
+	var overdue []expired
+
+	m.mu.Lock()
+	now := m.Clock()
+	for id, r := range m.runs {
+		if now.Sub(r.startedAt) >= m.Deadline {
+			overdue = append(overdue, expired{id: id, pipeline: r.pipeline})
+			delete(m.runs, id)
+		}
+	}
+	m.mu.Unlock()
+
+	for _, e := range overdue {
+		m.log.Warn("run deadline exceeded", "run_id", e.id, "deadline", m.Deadline.String())
+		m.emitFinished(ctx, e.id, e.pipeline, StatusErrored)
+	}
+}
+
+// RunReaper scans the run table every ReapInterval until ctx is cancelled
+// (returning nil), applying the deadline (Reap). It serves beside the two
+// queue loops; a non-positive interval returns immediately, leaving
+// reaping to explicit Reap calls.
+func (m *Machine) RunReaper(ctx context.Context) error {
+	if m.ReapInterval <= 0 {
+		return nil
+	}
+	ticker := time.NewTicker(m.ReapInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-ticker.C:
+			m.Reap(ctx)
+		}
+	}
 }
 
 // groupByStage splits a stage-ordered assignment slice into per-stage

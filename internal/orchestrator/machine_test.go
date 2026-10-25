@@ -5,7 +5,9 @@ import (
 	"errors"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/odyssey-ci-cd-platform/odyssey-core-orchestrator/internal/orchestrator"
 	"github.com/odyssey-ci-cd-platform/odyssey-core-orchestrator/internal/pipeline"
@@ -453,6 +455,158 @@ func TestMachineRetriesReleaseAfterFailedPublish(t *testing.T) {
 	}
 	if got := j.snapshot(); !reflect.DeepEqual(got, want) {
 		t.Errorf("journal = %v, want %v (release retried after the failure cleared, run finished)", got, want)
+	}
+}
+
+// fakeClock is the reaper's injectable time source (AUD-003): tests
+// advance it past a run's deadline without sleeping.
+type fakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *fakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *fakeClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// AUD-003: a run whose outcome never arrives cannot hang forever. Once the
+// default deadline passes, the reaper resolves the run as errored —
+// pipeline.finished carries status errored, the stage-2 release never
+// happens — evicts it, and later outcomes for the run change nothing.
+func TestMachineReapsRunPastDeadline(t *testing.T) {
+	j := &journal{}
+	clock := &fakeClock{now: time.Now()}
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
+	m.Clock = clock.Now
+	if err := m.Start(context.Background(), "run-1", "demo", twoJobFirstStageAssignments(t, "run-1")); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+		t.Fatalf("JobFinished() error = %v, want nil", err)
+	}
+
+	clock.Advance(2 * time.Hour) // past NewMachine's default deadline
+	m.Reap(context.Background())
+
+	if err := m.JobFinished(context.Background(), "run-1", "lint", orchestrator.StatusPassed); err != nil {
+		t.Fatalf("late JobFinished() error = %v, want nil", err)
+	}
+
+	want := []string{
+		"started:run-1",
+		"assign:run-1:build/compile",
+		"assign:run-1:build/lint",
+		"finished:run-1:errored",
+	}
+	if got := j.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Errorf("journal = %v, want %v (deadline resolved the lost-outcome run errored, then evicted it)", got, want)
+	}
+}
+
+// The deadline is machine-level and configurable: a shorter deadline reaps
+// a run the default would still keep, and a scan inside the deadline
+// leaves the run untouched.
+func TestMachineDeadlineIsConfigurable(t *testing.T) {
+	j := &journal{}
+	clock := &fakeClock{now: time.Now()}
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
+	m.Deadline = 30 * time.Minute
+	m.Clock = clock.Now
+	if err := m.Start(context.Background(), "run-1", "demo", singleStageAssignments(t, "run-1")); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+
+	clock.Advance(29 * time.Minute)
+	m.Reap(context.Background())
+	if got := j.snapshot(); len(got) != 2 {
+		t.Fatalf("journal = %v, want the run untouched inside its deadline", got)
+	}
+
+	clock.Advance(16 * time.Minute) // 45m: past the 30m deadline
+	m.Reap(context.Background())
+
+	want := []string{
+		"started:run-1",
+		"assign:run-1:build/compile",
+		"finished:run-1:errored",
+	}
+	if got := j.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Errorf("journal = %v, want %v (the 30m deadline resolved the run errored)", got, want)
+	}
+}
+
+// Degradation policy holds at the deadline too: a failed pipeline.finished
+// emission is logged and the eviction stands — the resolved run cannot be
+// stranded back into the table.
+func TestMachineDeadlineEvictionSurvivesEmitFailure(t *testing.T) {
+	j := &journal{}
+	log := &fakeLogger{}
+	clock := &fakeClock{now: time.Now()}
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, log)
+	m.Clock = clock.Now
+	if err := m.Start(context.Background(), "run-1", "demo", singleStageAssignments(t, "run-1")); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+	j.failEmit = true
+
+	clock.Advance(2 * time.Hour)
+	m.Reap(context.Background())
+
+	hasLog(t, log, "warn:run deadline exceeded", "run_id=run-1")
+	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+		t.Fatalf("late JobFinished() error = %v, want nil", err)
+	}
+	if got := j.snapshot(); len(got) != 3 {
+		t.Errorf("journal = %v, want the run evicted despite the emission failure", got)
+	}
+}
+
+// The reaper scans on a ticker: a run past its deadline is resolved while
+// RunReaper serves, and RunReaper returns nil on cancellation.
+func TestMachineRunReaperScansOnTicker(t *testing.T) {
+	j := &journal{}
+	clock := &fakeClock{now: time.Now()}
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
+	m.ReapInterval = 25 * time.Millisecond
+	m.Clock = clock.Now
+	if err := m.Start(context.Background(), "run-1", "demo", singleStageAssignments(t, "run-1")); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- m.RunReaper(ctx) }()
+
+	clock.Advance(2 * time.Hour)
+	deadline := time.Now().Add(2 * time.Second)
+	for len(j.snapshot()) < 3 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("RunReaper() error = %v, want nil on cancellation", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("RunReaper() did not return after cancellation")
+	}
+
+	want := []string{
+		"started:run-1",
+		"assign:run-1:build/compile",
+		"finished:run-1:errored",
+	}
+	if got := j.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Errorf("journal = %v, want %v (the ticker-driven reaper resolved the run errored)", got, want)
 	}
 }
 
