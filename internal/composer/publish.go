@@ -38,6 +38,9 @@ func (p *Publisher) Publish(ctx context.Context, req RunRequest) error {
 	if err := req.Validate(); err != nil {
 		return fmt.Errorf("refusing to publish invalid run request: %w", err)
 	}
+	if err := req.Config.Validate(); err != nil {
+		return fmt.Errorf("refusing to publish run request with invalid config: %w", err)
+	}
 	body, err := json.Marshal(req)
 	if err != nil {
 		return err

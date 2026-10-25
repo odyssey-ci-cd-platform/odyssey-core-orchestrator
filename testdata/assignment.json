@@ -1,0 +1,14 @@
+{
+  "run_id": "from the orchestrator's pipeline.started event",
+  "pipeline": "demo",
+  "stage": "build",
+  "job": "compile",
+  "attempt": 1,
+  "source": { "repo": "org/repo", "commit": "full sha" },
+  "job_spec": {
+    "image": "alpine",
+    "setup": ["apk add git"],
+    "env": { "KEY": "value" },
+    "steps": [{ "name": "compile", "run": "make", "timeout_ms": 300000 }]
+  }
+}
