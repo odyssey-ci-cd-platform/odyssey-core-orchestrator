@@ -130,8 +130,18 @@ func jobNames(stage []Assignment) map[string]bool {
 // Errored ends the run with the run's worst status (AUD-010 ranking) and
 // no further stages. Unknown run ids and duplicate or stray jobs are
 // ignored — after a restart lost in-flight state there is nothing to
-// sequence. A stage-release publish failure returns the error and leaves
-// the entry unacknowledged; emission failures degrade.
+// sequence.
+//
+// A stage release publishes before it commits: when the publish fails,
+// the advance is rolled back — the triggering job returns to the pending
+// set — and the error surfaces, so the outcome's unacknowledged entry is
+// redelivered by the event loop's start recovery (XREADGROUP 0) and
+// re-applies the outcome instead of finding the job already consumed
+// (AUD-001). A release that failed midway may re-publish assignments the
+// first attempt already enqueued: the job queue is at-least-once within
+// a recovering stage. A release that already succeeded stays idempotent:
+// the outcome's job is no longer pending, so a redelivered entry changes
+// nothing. Emission failures degrade.
 func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) error {
 	var (
 		pipeline string
@@ -145,6 +155,7 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 		m.mu.Unlock()
 		return nil
 	}
+	prevWorst := r.worst
 	delete(r.pending, job)
 	r.worst = worstStatus(r.worst, status)
 	if len(r.pending) == 0 {
@@ -169,8 +180,21 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 		m.emitFinished(ctx, runID, pipeline, finished)
 		return nil
 	}
-	if release != nil {
-		return m.publishStage(ctx, release, runID)
+	if release == nil {
+		return nil
+	}
+	if err := m.publishStage(ctx, release, runID); err != nil {
+		m.mu.Lock()
+		if r, ok := m.runs[runID]; ok {
+			// The stage never published; unwind the advance so the
+			// outcome can be re-applied. The decision emptied the
+			// pending set, so restoring it is the triggering job alone.
+			r.next--
+			r.pending = map[string]bool{job: true}
+			r.worst = prevWorst
+		}
+		m.mu.Unlock()
+		return err
 	}
 	return nil
 }

@@ -110,6 +110,11 @@ func TestValidateRejectsEnvelopeViolations(t *testing.T) {
 			want:  "pipeline must not be empty",
 		},
 		{
+			name:  "pipeline disagrees with config.pipeline",
+			mutot: func(r *orchestrator.RunRequest) { r.Config.Pipeline = "other" },
+			want:  `pipeline "demo" does not match config.pipeline "other"`,
+		},
+		{
 			name: "structurally invalid config",
 			mutot: func(r *orchestrator.RunRequest) {
 				bad := r.Config.Jobs["test"]
@@ -211,6 +216,12 @@ func TestSegmentMarshalsContractShape(t *testing.T) {
 		if _, ok := jobSpec[key]; !ok {
 			t.Errorf("job_spec missing %q: %s", key, raw)
 		}
+	}
+	// The job's name and stage ride the envelope, not the spec (contract
+	// § Job assignment) — the exact-fixture test in contract_test.go pins
+	// the whole shape; this asserts the one key at the Segment site.
+	if _, ok := jobSpec["stage"]; ok {
+		t.Errorf("job_spec carries stage: %s", raw)
 	}
 }
 

@@ -28,9 +28,9 @@ type RunRequest struct {
 	Config    pipeline.Config `json:"config"`
 }
 
-// Validate enforces the contract's envelope field rules. The resolved
-// configuration's own validity is pipeline.Parse's job: it was checked when
-// the config was attached, and it travels as structured data, not text.
+// Validate enforces the contract's envelope field rules, including the
+// pipeline cross-check. The attached config's own validity is re-checked
+// at Publish: the door holds at the wire for the whole request.
 func (r RunRequest) Validate() error {
 	var errs []error
 
@@ -45,6 +45,9 @@ func (r RunRequest) Validate() error {
 	}
 	if r.Pipeline == "" {
 		errs = append(errs, errors.New("pipeline must not be empty"))
+	}
+	if r.Pipeline != r.Config.Pipeline {
+		errs = append(errs, fmt.Errorf("pipeline %q does not match config.pipeline %q", r.Pipeline, r.Config.Pipeline))
 	}
 	return errors.Join(errs...)
 }

@@ -11,6 +11,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/odyssey-ci-cd-platform/odyssey-core-orchestrator/internal/composer"
+	"github.com/odyssey-ci-cd-platform/odyssey-core-orchestrator/internal/pipeline"
 )
 
 func newTestRedis(t *testing.T) (*composer.Publisher, *redis.Client) {
@@ -74,6 +75,29 @@ func TestPublishRefusesInvalidRequest(t *testing.T) {
 	err := pub.Publish(context.Background(), req)
 	if err == nil {
 		t.Fatal("Publish() error = nil, want refusal")
+	}
+	if !strings.Contains(err.Error(), "refusing to publish") {
+		t.Errorf("error = %q, want refusal wording", err)
+	}
+	n, err := client.XLen(context.Background(), composer.StreamPipelineRequests).Result()
+	if err != nil {
+		t.Fatalf("XLen() error = %v", err)
+	}
+	if n != 0 {
+		t.Errorf("stream has %d entries, want 0", n)
+	}
+}
+
+// The door holds at the wire for the attached config too: an envelope
+// wrapped around an invalid config is refused, never enqueued (AUD-006).
+func TestPublishRefusesInvalidConfig(t *testing.T) {
+	pub, client := newTestRedis(t)
+
+	req := validRequest()
+	req.Config.Jobs["compile"] = pipeline.Job{Stage: "build"} // no image, no steps
+	err := pub.Publish(context.Background(), req)
+	if err == nil {
+		t.Fatal("Publish() error = nil, want refusal for an invalid config")
 	}
 	if !strings.Contains(err.Error(), "refusing to publish") {
 		t.Errorf("error = %q, want refusal wording", err)

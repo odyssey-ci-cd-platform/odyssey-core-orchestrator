@@ -84,6 +84,11 @@ func TestValidateRejectsContractViolations(t *testing.T) {
 			mutot: func(r *composer.RunRequest) { r.Pipeline = "" },
 			want:  "pipeline must not be empty",
 		},
+		{
+			name:  "pipeline disagrees with config.pipeline",
+			mutot: func(r *composer.RunRequest) { r.Config.Pipeline = "other" },
+			want:  `pipeline "demo" does not match config.pipeline "other"`,
+		},
 	}
 
 	for _, tt := range tests {
