@@ -18,7 +18,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false # the job only reads; no pushes
       # actions/setup-go v5 — the dispatcher repo's ci.yml is the reference.
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e
         with:
           go-version-file: go.mod
       # The single gate: docs check plus the Go gate with -race (AUD-011).
