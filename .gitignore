@@ -6,3 +6,7 @@ STATE.md
 
 # Harness gate config — machine-local paths (allowPaths), not repo content.
 gates.json
+
+# Audit-effort scratch (issue bodies, tmux state) and parallel worktrees.
+.audit-work/
+.worktrees/
