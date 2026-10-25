@@ -109,10 +109,10 @@ func TestEventLoopRecoversPendingOutcomeAfterRestart(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	machine := orchestrator.NewMachine(fakeEvents{j}, sink)
-	loop := orchestrator.NewLoop(client, machine)
+	machine := orchestrator.NewMachine(fakeEvents{j}, sink, nil)
+	loop := orchestrator.NewLoop(client, machine, &fakeDeadLetters{}, nil)
 	loop.Block = 25 * time.Millisecond
-	eventLoop := orchestrator.NewEventLoop(client, machine)
+	eventLoop := orchestrator.NewEventLoop(client, machine, nil)
 	eventLoop.Block = 25 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -163,7 +163,7 @@ func TestEventLoopRecoversPendingOutcomeAfterRestart(t *testing.T) {
 	// recovers the pending entry and releases the stage.
 	sink.failStage = ""
 	recovered := make(chan error, 1)
-	restarted := orchestrator.NewEventLoop(client, machine)
+	restarted := orchestrator.NewEventLoop(client, machine, nil)
 	restarted.Block = 25 * time.Millisecond
 	go func() { recovered <- restarted.Run(ctx) }()
 

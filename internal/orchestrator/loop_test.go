@@ -357,8 +357,8 @@ func TestLoopRecoversUnacknowledgedRunAfterRestart(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	machine := orchestrator.NewMachine(fakeEvents{j}, sink)
-	loop := orchestrator.NewLoop(client, machine)
+	machine := orchestrator.NewMachine(fakeEvents{j}, sink, nil)
+	loop := orchestrator.NewLoop(client, machine, &fakeDeadLetters{}, nil)
 	loop.Block = 25 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -389,7 +389,7 @@ func TestLoopRecoversUnacknowledgedRunAfterRestart(t *testing.T) {
 	// entry off under a fresh run id.
 	sink.failStage = ""
 	recovered := make(chan error, 1)
-	restarted := orchestrator.NewLoop(client, machine)
+	restarted := orchestrator.NewLoop(client, machine, &fakeDeadLetters{}, nil)
 	restarted.Block = 25 * time.Millisecond
 	go func() { recovered <- restarted.Run(ctx) }()
 
