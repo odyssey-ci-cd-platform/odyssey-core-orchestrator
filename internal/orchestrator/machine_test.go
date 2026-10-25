@@ -48,7 +48,7 @@ func TestMachineReleasesNextStageWhenStagePasses(t *testing.T) {
 		t.Fatalf("Start() error = %v, want nil", err)
 	}
 
-	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("JobFinished() error = %v, want nil", err)
 	}
 
@@ -86,7 +86,7 @@ func TestMachineFinishesSingleStageRun(t *testing.T) {
 		t.Fatalf("Start() error = %v, want nil", err)
 	}
 
-	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("JobFinished() error = %v, want nil", err)
 	}
 
@@ -112,7 +112,7 @@ func TestMachineSequencesRunsIndependently(t *testing.T) {
 		t.Fatalf("Start(run-2) error = %v, want nil", err)
 	}
 
-	if err := m.JobFinished(context.Background(), "run-2", "compile", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-2", "compile", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("JobFinished() error = %v, want nil", err)
 	}
 
@@ -159,7 +159,7 @@ func TestMachineEndsRunOnFailedStage(t *testing.T) {
 		t.Fatalf("Start() error = %v, want nil", err)
 	}
 
-	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusFailed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusFailed); err != nil {
 		t.Fatalf("JobFinished() error = %v, want nil", err)
 	}
 
@@ -184,14 +184,14 @@ func TestMachineWaitsForFullStageResolution(t *testing.T) {
 		t.Fatalf("Start() error = %v, want nil", err)
 	}
 
-	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusFailed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusFailed); err != nil {
 		t.Fatalf("JobFinished(compile) error = %v, want nil", err)
 	}
 	if got := j.snapshot(); len(got) != 3 {
 		t.Fatalf("journal = %v, want no decision while lint is still pending", got)
 	}
 
-	if err := m.JobFinished(context.Background(), "run-1", "lint", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-1", "lint", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("JobFinished(lint) error = %v, want nil", err)
 	}
 
@@ -224,10 +224,10 @@ func TestMachineReportsErroredAsWorst(t *testing.T) {
 			if err := m.Start(context.Background(), "run-1", "demo", twoJobFirstStageAssignments(t, "run-1")); err != nil {
 				t.Fatalf("Start() error = %v, want nil", err)
 			}
-			if err := m.JobFinished(context.Background(), "run-1", "compile", tt.first); err != nil {
+			if err := m.JobFinished(context.Background(), "run-1", "compile", 1, tt.first); err != nil {
 				t.Fatalf("JobFinished(compile) error = %v, want nil", err)
 			}
-			if err := m.JobFinished(context.Background(), "run-1", "lint", tt.second); err != nil {
+			if err := m.JobFinished(context.Background(), "run-1", "lint", 1, tt.second); err != nil {
 				t.Fatalf("JobFinished(lint) error = %v, want nil", err)
 			}
 
@@ -266,10 +266,10 @@ func TestMachineRanksUnknownSlugWorst(t *testing.T) {
 			if err := m.Start(context.Background(), "run-1", "demo", twoJobFirstStageAssignments(t, "run-1")); err != nil {
 				t.Fatalf("Start() error = %v, want nil", err)
 			}
-			if err := m.JobFinished(context.Background(), "run-1", "compile", tt.first); err != nil {
+			if err := m.JobFinished(context.Background(), "run-1", "compile", 1, tt.first); err != nil {
 				t.Fatalf("JobFinished(compile) error = %v, want nil", err)
 			}
-			if err := m.JobFinished(context.Background(), "run-1", "lint", tt.second); err != nil {
+			if err := m.JobFinished(context.Background(), "run-1", "lint", 1, tt.second); err != nil {
 				t.Fatalf("JobFinished(lint) error = %v, want nil", err)
 			}
 
@@ -303,7 +303,7 @@ func TestStartAbortsWhenStartedEmitFails(t *testing.T) {
 		}
 	}
 
-	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("JobFinished() error = %v, want nil", err)
 	}
 	for _, e := range j.snapshot() {
@@ -321,13 +321,13 @@ func TestMachineIgnoresOutcomesForUntrackedRuns(t *testing.T) {
 	if err := m.Start(context.Background(), "run-1", "demo", singleStageAssignments(t, "run-1")); err != nil {
 		t.Fatalf("Start() error = %v, want nil", err)
 	}
-	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("JobFinished() error = %v, want nil", err)
 	}
 
 	before := j.snapshot()
-	_ = m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed)
-	_ = m.JobFinished(context.Background(), "run-9", "compile", orchestrator.StatusPassed)
+	_ = m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed)
+	_ = m.JobFinished(context.Background(), "run-9", "compile", 1, orchestrator.StatusPassed)
 
 	if got := j.snapshot(); !reflect.DeepEqual(got, before) {
 		t.Errorf("journal = %v, want unchanged (%v)", got, before)
@@ -342,7 +342,7 @@ func TestMachineToleratesNilLogger(t *testing.T) {
 	if err := m.Start(context.Background(), "run-1", "demo", singleStageAssignments(t, "run-1")); err != nil {
 		t.Fatalf("Start() error = %v, want nil", err)
 	}
-	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("JobFinished() error = %v, want nil", err)
 	}
 
@@ -371,7 +371,7 @@ func TestMachineLogsDegradedEmissions(t *testing.T) {
 		t.Fatalf("Start() error = %v, want nil", err)
 	}
 	j.failEmit = true
-	if err := m.JobFinished(context.Background(), "run-2", "compile", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-2", "compile", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("JobFinished() error = %v, want nil", err)
 	}
 	hasLog(t, log, "warn:pipeline.finished emission failed", "run_id=run-2")
@@ -388,12 +388,12 @@ func TestMachineEndsRunEvenWhenFinishedEmitFails(t *testing.T) {
 	// The started emission succeeded; only the finished emission fails
 	// (since AUD-015 a failing started emission aborts the start itself).
 	j.failEmit = true
-	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("JobFinished() error = %v, want nil", err)
 	}
 
 	before := j.snapshot()
-	_ = m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed)
+	_ = m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed)
 
 	if got := j.snapshot(); !reflect.DeepEqual(got, before) {
 		t.Errorf("journal = %v, want unchanged (%v) — the run ended despite the emission failure", got, before)
@@ -433,17 +433,17 @@ func TestMachineRetriesReleaseAfterFailedPublish(t *testing.T) {
 		t.Fatalf("Start() error = %v, want nil", err)
 	}
 
-	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err == nil {
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed); err == nil {
 		t.Fatal("JobFinished() error = nil, want the release publish failure surfaced")
 	}
 
 	// The transient failure clears; the event loop redelivers the still-
 	// unacknowledged outcome.
 	sink.failStage = ""
-	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("redelivered JobFinished() error = %v, want the release retried to success", err)
 	}
-	if err := m.JobFinished(context.Background(), "run-1", "test", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-1", "test", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("JobFinished(test) error = %v, want nil", err)
 	}
 
@@ -455,6 +455,47 @@ func TestMachineRetriesReleaseAfterFailedPublish(t *testing.T) {
 	}
 	if got := j.snapshot(); !reflect.DeepEqual(got, want) {
 		t.Errorf("journal = %v, want %v (release retried after the failure cleared, run finished)", got, want)
+	}
+}
+
+// AUD-004: a reclaimed job re-executes under the same run id with an
+// incremented attempt (the pending contract revision, gh-25). The machine
+// accepts a terminal outcome whose attempt exceeds the recorded one for a
+// job still pending — the reclaim re-execution's outcome replaces the lost
+// first attempt — and ignores an attempt below the recorded one. Attempt 1
+// on a pending job stays the normal path.
+func TestMachineAcceptsReclaimAttemptOutcome(t *testing.T) {
+	j := &journal{}
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
+	assignments, err := orchestrator.Segment(mustDecode(t, validEnvelope), "run-1")
+	if err != nil {
+		t.Fatalf("Segment() error = %v, want nil", err)
+	}
+	if err := m.Start(context.Background(), "run-1", "demo", assignments); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+
+	// An attempt below the recorded one cannot resolve the job.
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 0, orchestrator.StatusPassed); err != nil {
+		t.Fatalf("JobFinished(attempt 0) error = %v, want nil", err)
+	}
+	if got := j.snapshot(); len(got) != 2 {
+		t.Fatalf("journal = %v, want the sub-recorded attempt ignored", got)
+	}
+
+	// The reclaim re-execution's outcome — attempt 2, the first attempt's
+	// outcome lost — replaces it: stage 2 releases under the same run id.
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 2, orchestrator.StatusPassed); err != nil {
+		t.Fatalf("JobFinished(attempt 2) error = %v, want nil", err)
+	}
+
+	want := []string{
+		"started:run-1",
+		"assign:run-1:build/compile",
+		"assign:run-1:test/test",
+	}
+	if got := j.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Errorf("journal = %v, want %v (attempt 2 outcome replaced the lost first attempt)", got, want)
 	}
 }
 
@@ -489,14 +530,14 @@ func TestMachineReapsRunPastDeadline(t *testing.T) {
 	if err := m.Start(context.Background(), "run-1", "demo", twoJobFirstStageAssignments(t, "run-1")); err != nil {
 		t.Fatalf("Start() error = %v, want nil", err)
 	}
-	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("JobFinished() error = %v, want nil", err)
 	}
 
 	clock.Advance(2 * time.Hour) // past NewMachine's default deadline
 	m.Reap(context.Background())
 
-	if err := m.JobFinished(context.Background(), "run-1", "lint", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-1", "lint", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("late JobFinished() error = %v, want nil", err)
 	}
 
@@ -561,7 +602,7 @@ func TestMachineDeadlineEvictionSurvivesEmitFailure(t *testing.T) {
 	m.Reap(context.Background())
 
 	hasLog(t, log, "warn:run deadline exceeded", "run_id=run-1")
-	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("late JobFinished() error = %v, want nil", err)
 	}
 	if got := j.snapshot(); len(got) != 3 {
@@ -623,12 +664,12 @@ func TestMachineReleaseIsNotDuplicatedByRedelivery(t *testing.T) {
 	if err := m.Start(context.Background(), "run-1", "demo", assignments); err != nil {
 		t.Fatalf("Start() error = %v, want nil", err)
 	}
-	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("JobFinished() error = %v, want nil", err)
 	}
 
 	before := j.snapshot()
-	_ = m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed)
+	_ = m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed)
 
 	if got := j.snapshot(); !reflect.DeepEqual(got, before) {
 		t.Errorf("journal = %v, want unchanged (%v) — no duplicate release for the redelivered outcome", got, before)

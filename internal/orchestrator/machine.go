@@ -49,13 +49,14 @@ type Machine struct {
 
 // run is one in-flight pipeline run: its stages grouped in declared order,
 // the index of the next stage to release, the current stage's unfinished
-// job names, the worst job outcome resolved so far, and when the run
-// started (the reaper's deadline anchor).
+// job names with the attempt each was published under, the worst job
+// outcome resolved so far, and when the run started (the reaper's deadline
+// anchor).
 type run struct {
 	pipeline  string
 	stages    [][]Assignment
 	next      int
-	pending   map[string]bool
+	pending   map[string]int
 	worst     string
 	startedAt time.Time
 }
@@ -107,7 +108,7 @@ func (m *Machine) Start(ctx context.Context, runID, pipeline string, assignments
 		pipeline:  pipeline,
 		stages:    stages,
 		next:      1,
-		pending:   jobNames(stages[0]),
+		pending:   jobAttempts(stages[0]),
 		worst:     StatusPassed,
 		startedAt: m.Clock(),
 	}
@@ -200,13 +201,15 @@ func groupByStage(assignments []Assignment) [][]Assignment {
 	return stages
 }
 
-// jobNames extracts a stage's job names into a set.
-func jobNames(stage []Assignment) map[string]bool {
-	names := make(map[string]bool, len(stage))
+// jobAttempts maps a stage's job names to the attempt each assignment was
+// published under (Segment publishes 1; the dispatcher increments on
+// reclaim).
+func jobAttempts(stage []Assignment) map[string]int {
+	attempts := make(map[string]int, len(stage))
 	for _, a := range stage {
-		names[a.Job] = true
+		attempts[a.Job] = a.Attempt
 	}
-	return names
+	return attempts
 }
 
 // JobFinished applies one dispatcher job outcome to its run. The job
@@ -220,6 +223,14 @@ func jobNames(stage []Assignment) map[string]bool {
 // ignored — after a restart lost in-flight state there is nothing to
 // sequence.
 //
+// Attempt (AUD-004, pending contract revision): a job is pending at the
+// attempt this repo published it under (Segment publishes 1). A terminal
+// outcome whose attempt is at least the recorded one resolves the job —
+// an attempt above the recorded one is a reclaim re-execution's outcome
+// replacing the lost first attempt — and an outcome below the recorded
+// attempt is stale and ignored. The first accepted outcome wins: once the
+// job is resolved, later attempts of it are stray.
+//
 // A stage release publishes before it commits: when the publish fails,
 // the advance is rolled back — the triggering job returns to the pending
 // set — and the error surfaces, so the outcome's unacknowledged entry is
@@ -230,7 +241,7 @@ func jobNames(stage []Assignment) map[string]bool {
 // a recovering stage. A release that already succeeded stays idempotent:
 // the outcome's job is no longer pending, so a redelivered entry changes
 // nothing. Emission failures degrade.
-func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) error {
+func (m *Machine) JobFinished(ctx context.Context, runID, job string, attempt int, status string) error {
 	var (
 		pipeline string
 		finished string
@@ -239,7 +250,14 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 
 	m.mu.Lock()
 	r, ok := m.runs[runID]
-	if !ok || !r.pending[job] {
+	if !ok {
+		m.mu.Unlock()
+		return nil
+	}
+	recorded, ok := r.pending[job]
+	if !ok || attempt < recorded {
+		// Not pending, or an outcome of an attempt the job already
+		// superseded: nothing to sequence.
 		m.mu.Unlock()
 		return nil
 	}
@@ -252,7 +270,7 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 			if r.next < len(r.stages) {
 				release = r.stages[r.next]
 				r.next++
-				r.pending = jobNames(release)
+				r.pending = jobAttempts(release)
 			} else {
 				finished = StatusPassed
 				delete(m.runs, runID)
@@ -276,9 +294,10 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 		if r, ok := m.runs[runID]; ok {
 			// The stage never published; unwind the advance so the
 			// outcome can be re-applied. The decision emptied the
-			// pending set, so restoring it is the triggering job alone.
+			// pending set, so restoring it is the triggering job alone,
+			// at the attempt it was recorded under.
 			r.next--
-			r.pending = map[string]bool{job: true}
+			r.pending = map[string]int{job: recorded}
 			r.worst = prevWorst
 		}
 		m.mu.Unlock()
