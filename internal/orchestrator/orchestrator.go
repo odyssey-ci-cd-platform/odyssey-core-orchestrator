@@ -2,8 +2,8 @@
 // job assignments (dispatcher contract §§ Run request, Job assignment). It
 // owns its consumer-side run-request type outright: the queue is untrusted
 // input, so everything is re-validated here regardless of what the composer
-// published. This slice is pure — bytes in, values out; the queue loop is
-// the next work item.
+// published. This slice is pure — bytes in, values out; the queue loop
+// (loop.go) and the event loop (eventloop.go) drive it.
 package orchestrator
 
 import (
@@ -56,6 +56,9 @@ func (r RunRequest) Validate() error {
 	if r.Pipeline == "" {
 		errs = append(errs, errors.New("pipeline must not be empty"))
 	}
+	if r.Pipeline != r.Config.Pipeline {
+		errs = append(errs, fmt.Errorf("pipeline %q does not match config.pipeline %q", r.Pipeline, r.Config.Pipeline))
+	}
 	if err := r.Config.Validate(); err != nil {
 		errs = append(errs, err)
 	}
@@ -83,16 +86,26 @@ type Source struct {
 	Commit string `json:"commit"`
 }
 
+// JobSpec is a job's execution spec on the assignment wire (contract §
+// Job assignment): the spec alone, because the job's name and stage ride
+// the envelope — a dispatcher reconstructs its domain.Job from both.
+type JobSpec struct {
+	Image string            `json:"image"`
+	Setup []string          `json:"setup,omitempty"`
+	Env   map[string]string `json:"env,omitempty"`
+	Steps []pipeline.Step   `json:"steps"`
+}
+
 // Assignment is one job assignment in the contract's § Job assignment shape:
 // run context plus job spec, never outcomes.
 type Assignment struct {
-	RunID    string       `json:"run_id"`
-	Pipeline string       `json:"pipeline"`
-	Stage    string       `json:"stage"`
-	Job      string       `json:"job"`
-	Attempt  int          `json:"attempt"`
-	Source   Source       `json:"source"`
-	JobSpec  pipeline.Job `json:"job_spec"`
+	RunID    string  `json:"run_id"`
+	Pipeline string  `json:"pipeline"`
+	Stage    string  `json:"stage"`
+	Job      string  `json:"job"`
+	Attempt  int     `json:"attempt"`
+	Source   Source  `json:"source"`
+	JobSpec  JobSpec `json:"job_spec"`
 }
 
 // Segment turns a validated run request plus a run id into one assignment
@@ -120,6 +133,7 @@ func Segment(req RunRequest, runID string) ([]Assignment, error) {
 		}
 		sort.Strings(names)
 		for _, name := range names {
+			job := req.Config.Jobs[name]
 			assignments = append(assignments, Assignment{
 				RunID:    runID,
 				Pipeline: req.Pipeline,
@@ -127,7 +141,7 @@ func Segment(req RunRequest, runID string) ([]Assignment, error) {
 				Job:      name,
 				Attempt:  1,
 				Source:   src,
-				JobSpec:  req.Config.Jobs[name],
+				JobSpec:  JobSpec{Image: job.Image, Setup: job.Setup, Env: job.Env, Steps: job.Steps},
 			})
 		}
 	}

@@ -1,0 +1,9 @@
+{
+  "type": "job.finished",
+  "occurred_at": "2026-10-17T05:47:00Z",
+  "run_id": "run-8f3a1c4d",
+  "pipeline": "demo",
+  "job": "compile",
+  "step": "compile",
+  "payload": { "status": "passed" }
+}

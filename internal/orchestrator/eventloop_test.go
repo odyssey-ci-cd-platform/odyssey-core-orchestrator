@@ -97,6 +97,94 @@ func TestEventLoopDrivesMachineFromTheBus(t *testing.T) {
 	}
 }
 
+// AUD-001: a release publish failure must not strand the run behind the
+// unacknowledged entry. The event loop exits with the error and the
+// outcome stays pending; a restarted event loop re-reads the group's own
+// pending entries (XREADGROUP 0), re-applies the outcome, releases the
+// stage, and acknowledges the entry.
+func TestEventLoopRecoversPendingOutcomeAfterRestart(t *testing.T) {
+	j := &journal{}
+	sink := &flakyAssignments{j: j, failStage: "test"}
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	machine := orchestrator.NewMachine(fakeEvents{j}, sink)
+	loop := orchestrator.NewLoop(client, machine)
+	loop.Block = 25 * time.Millisecond
+	eventLoop := orchestrator.NewEventLoop(client, machine)
+	eventLoop.Block = 25 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	requestsDone := make(chan error, 1)
+	eventsDone := make(chan error, 1)
+	go func() { requestsDone <- loop.Run(ctx) }()
+	go func() { eventsDone <- eventLoop.Run(ctx) }()
+
+	seed(t, client, validEnvelope)
+	waitFor(t, j, 2) // started + first stage
+	id := runIDOf(j.snapshot()[1])
+
+	body, err := json.Marshal(orchestrator.Event{
+		Type:       orchestrator.EventJobFinished,
+		OccurredAt: time.Now().UTC(),
+		RunID:      id,
+		Pipeline:   "demo",
+		Job:        "compile",
+		Payload:    map[string]string{"status": orchestrator.StatusPassed},
+	})
+	if err != nil {
+		t.Fatalf("marshal job.finished: %v", err)
+	}
+	seedEvent(t, client, string(body))
+
+	// The release of stage 2 fails: the event loop exits with the error and
+	// the outcome's entry stays unacknowledged, nothing published.
+	select {
+	case err := <-eventsDone:
+		if err == nil {
+			t.Fatal("event loop error = nil, want the release publish failure")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("event loop did not return after the failed release")
+	}
+	pending, err := client.XPending(context.Background(), orchestrator.StreamEvents, "orchestrator").Result()
+	if err != nil {
+		t.Fatalf("XPending() error = %v", err)
+	}
+	if pending.Count != 1 {
+		t.Fatalf("pending outcome entries = %d, want 1 (the failed release's trigger)", pending.Count)
+	}
+	if got := len(j.snapshot()); got != 2 {
+		t.Fatalf("journal = %v, want stage 2 unpublished while the failure lasts", j.snapshot())
+	}
+
+	// The transient failure clears with the restart: a fresh event loop
+	// recovers the pending entry and releases the stage.
+	sink.failStage = ""
+	recovered := make(chan error, 1)
+	restarted := orchestrator.NewEventLoop(client, machine)
+	restarted.Block = 25 * time.Millisecond
+	go func() { recovered <- restarted.Run(ctx) }()
+
+	waitFor(t, j, 3) // stage 2 released through the recovery read
+	waitAcked(t, client, orchestrator.StreamEvents)
+	cancel()
+	for _, done := range []<-chan error{requestsDone, recovered} {
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("loop error = %v, want nil on cancellation", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("a loop did not return after cancellation")
+		}
+	}
+	if got := j.snapshot()[2]; got != "assign:"+id+":test/test" {
+		t.Errorf("third entry = %q, want stage 2 released by the recovered outcome under run id %q", got, id)
+	}
+}
+
 func TestEventLoopServesOnlySequenceableEvents(t *testing.T) {
 	j := &journal{}
 	log := &fakeLogger{}

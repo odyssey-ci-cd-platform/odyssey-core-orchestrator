@@ -59,13 +59,46 @@ func NewEmitter(client redis.UniversalClient) *Emitter {
 	return &Emitter{client: client}
 }
 
-// Validate enforces the one rule every consumer relies on: an event names
-// its type. Everything else is the producer's data.
+// Validate enforces the contract's per-event envelope rules (§ Event
+// emission responsibilities): every event names its type, run, and pipeline;
+// this emitter publishes this repo's two lifecycle events only, and each
+// carries exactly its pinned fields — pipeline.started with no job, step,
+// or payload; pipeline.finished with no job or step and a worst-stage
+// status payload (AUD-015).
 func (e Event) Validate() error {
+	var errs []error
 	if e.Type == "" {
-		return errors.New("type must not be empty")
+		errs = append(errs, errors.New("type must not be empty"))
 	}
-	return nil
+	if e.RunID == "" {
+		errs = append(errs, errors.New("run_id must not be empty"))
+	}
+	if e.Pipeline == "" {
+		errs = append(errs, errors.New("pipeline must not be empty"))
+	}
+	switch e.Type {
+	case EventPipelineStarted:
+		if e.Job != "" || e.Step != "" {
+			errs = append(errs, errors.New("pipeline.started carries no job or step"))
+		}
+		if len(e.Payload) != 0 {
+			errs = append(errs, errors.New("pipeline.started carries no payload"))
+		}
+	case EventPipelineFinished:
+		if e.Job != "" || e.Step != "" {
+			errs = append(errs, errors.New("pipeline.finished carries no job or step"))
+		}
+		switch e.Payload["status"] {
+		case StatusPassed, StatusFailed, StatusErrored:
+		default:
+			errs = append(errs, fmt.Errorf("pipeline.finished payload must carry status passed, failed, or errored, got %q", e.Payload["status"]))
+		}
+	default:
+		if e.Type != "" {
+			errs = append(errs, fmt.Errorf("unknown event type %q: this emitter publishes pipeline lifecycle events only", e.Type))
+		}
+	}
+	return errors.Join(errs...)
 }
 
 // Publish writes one event as the stream entry's single envelope field.

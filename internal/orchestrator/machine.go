@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -51,13 +52,27 @@ func NewMachine(events EventSink, assignments AssignmentSink, log Logger) *Machi
 
 // Start hands off one segmented run: pipeline.started first — the results
 // DB's parent-row invariant — then the first stage only. Later stages wait
-// on JobFinished. A stage-1 publish failure returns the error and leaves
-// nothing behind; emission failures degrade per the platform's policy
-// (dispatcher repo ADR 0001) and never fail the start.
+// on JobFinished. The run registers only after its started event is on the
+// bus (AUD-015): an emission failure aborts the start — the error returns,
+// nothing is tracked, no job is published — because a tracked run whose
+// parent row can never exist is exactly the stranding the invariant
+// forbids. A stage-1 publish failure rolls the run back out of the table.
 func (m *Machine) Start(ctx context.Context, runID, pipeline string, assignments []Assignment) error {
 	stages := groupByStage(assignments)
 	if len(stages) == 0 {
 		return nil // a validated request always has a job; nothing to sequence
+	}
+
+	if err := m.events.Publish(ctx, Event{
+		Type:       EventPipelineStarted,
+		OccurredAt: time.Now(),
+		RunID:      runID,
+		Pipeline:   pipeline,
+	}); err != nil {
+		// Abort, but leave a trace: the queue entry stays pending and the
+		// error surfaces, yet nothing downstream sees why without this.
+		m.log.Warn("pipeline.started emission failed", "run_id", runID, "err", err)
+		return fmt.Errorf("emitting pipeline.started for %s: %w", runID, err)
 	}
 
 	r := &run{
@@ -70,16 +85,6 @@ func (m *Machine) Start(ctx context.Context, runID, pipeline string, assignments
 	m.mu.Lock()
 	m.runs[runID] = r
 	m.mu.Unlock()
-
-	if err := m.events.Publish(ctx, Event{
-		Type:       EventPipelineStarted,
-		OccurredAt: time.Now(),
-		RunID:      runID,
-		Pipeline:   pipeline,
-	}); err != nil {
-		// Degradation: never fail a run over emission — but leave a trace.
-		m.log.Warn("pipeline.started emission failed", "run_id", runID, "err", err)
-	}
 
 	if err := m.publishStage(ctx, r.stages[0], runID); err != nil {
 		m.mu.Lock()
@@ -133,8 +138,18 @@ func jobNames(stage []Assignment) map[string]bool {
 // Errored ends the run with the run's worst status (AUD-010 ranking) and
 // no further stages. Unknown run ids and duplicate or stray jobs are
 // ignored — after a restart lost in-flight state there is nothing to
-// sequence. A stage-release publish failure returns the error and leaves
-// the entry unacknowledged; emission failures degrade.
+// sequence.
+//
+// A stage release publishes before it commits: when the publish fails,
+// the advance is rolled back — the triggering job returns to the pending
+// set — and the error surfaces, so the outcome's unacknowledged entry is
+// redelivered by the event loop's start recovery (XREADGROUP 0) and
+// re-applies the outcome instead of finding the job already consumed
+// (AUD-001). A release that failed midway may re-publish assignments the
+// first attempt already enqueued: the job queue is at-least-once within
+// a recovering stage. A release that already succeeded stays idempotent:
+// the outcome's job is no longer pending, so a redelivered entry changes
+// nothing. Emission failures degrade.
 func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) error {
 	var (
 		pipeline string
@@ -148,6 +163,7 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 		m.mu.Unlock()
 		return nil
 	}
+	prevWorst := r.worst
 	delete(r.pending, job)
 	r.worst = worstStatus(r.worst, status)
 	if len(r.pending) == 0 {
@@ -162,7 +178,7 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 				delete(m.runs, runID)
 			}
 		} else {
-			finished = r.worst
+			finished = runStatus(r.worst)
 			delete(m.runs, runID)
 		}
 	}
@@ -172,23 +188,50 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 		m.emitFinished(ctx, runID, pipeline, finished)
 		return nil
 	}
-	if release != nil {
-		return m.publishStage(ctx, release, runID)
+	if release == nil {
+		return nil
+	}
+	if err := m.publishStage(ctx, release, runID); err != nil {
+		m.mu.Lock()
+		if r, ok := m.runs[runID]; ok {
+			// The stage never published; unwind the advance so the
+			// outcome can be re-applied. The decision emptied the
+			// pending set, so restoring it is the triggering job alone.
+			r.next--
+			r.pending = map[string]bool{job: true}
+			r.worst = prevWorst
+		}
+		m.mu.Unlock()
+		return err
 	}
 	return nil
 }
 
 // statusRank orders the job outcome slugs the machine sequences on,
-// following the dispatcher's ranking (AUD-010): Errored is worst, then
-// Failed; Passed is best.
+// following the dispatcher's ranking (AUD-010): Errored is worst of the
+// known slugs, then Failed, then Passed. A slug the machine cannot
+// classify ranks worse than Errored (AUD-015) — an unreadable outcome
+// must never be read as success.
 func statusRank(s string) int {
 	switch s {
 	case StatusErrored:
 		return 2
 	case StatusFailed:
 		return 1
+	case StatusPassed:
+		return 0
 	}
-	return 0
+	return 3
+}
+
+// runStatus maps the run's worst outcome onto the contract's
+// pipeline.finished payload slugs (passed/failed/errored): an
+// unclassifiable worst reports as Errored.
+func runStatus(worst string) string {
+	if statusRank(worst) > statusRank(StatusErrored) {
+		return StatusErrored
+	}
+	return worst
 }
 
 // worstStatus returns whichever of a, b ranks worse per statusRank.

@@ -1,0 +1,24 @@
+{
+  "trigger_id": "hook:42",
+  "repo": "org/repo",
+  "commit": "8f3a1c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+  "pipeline": "demo",
+  "config": {
+    "pipeline": "demo",
+    "stages": ["build", "test"],
+    "jobs": {
+      "compile": {
+        "stage": "build",
+        "image": "alpine",
+        "setup": ["apk add git"],
+        "env": { "KEY": "value" },
+        "steps": [{ "name": "compile", "run": "make", "timeout_ms": 300000 }]
+      },
+      "unit": {
+        "stage": "test",
+        "image": "golang",
+        "steps": [{ "name": "unit", "run": "go test ./...", "timeout_ms": 600000 }]
+      }
+    }
+  }
+}
