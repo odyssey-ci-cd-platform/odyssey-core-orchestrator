@@ -23,6 +23,9 @@ Notable changes to odyssey-core-orchestrator. Latest changes go at the top, unde
 - The Go gate (gh-5): `go vet` / `go test ./...` / `go mod tidy -diff` / gofmt in `make check` and CI; RUNBOOK records the baseline.
 - `internal/composer` (gh-7): the run request type with the contract's wire shape, envelope validation (origin enum, owner/repo slug, full 40-hex sha, non-empty trigger id and pipeline name — all violations in one error), and a publisher that writes single-envelope stream entries to `odyssey:pipeline-requests` with approximate MAXLEN trimming at the contract's default (10,000). Publish refuses invalid requests — the door holds at the wire.
 
+### Fixed
+- staticcheck QF1001 (gh-23, AUD-015): the composer's `validCommit` names its hex-digit predicate (`isHexDigit`) instead of negating a compound condition inline; behavior unchanged, the existing validation table pins it, and `golangci-lint run` is now clean at its pinned CI version.
+
 ### Changed
 - `Event.Validate` enforces the contract's per-event envelope rules (gh-23, AUD-015): every event names its type, run, and pipeline; `pipeline.started` carries no job, step, or payload; `pipeline.finished` carries no job or step and a payload status of passed/failed/errored; other types are refused — this emitter publishes this repo's pipeline lifecycle events only. Before, it checked only that the type was non-empty.
 - Unclassifiable job outcomes can no longer read as success (gh-23, AUD-015): `statusRank` ranks any slug outside passed/failed/errored worse than `errored`, and a run ended by one reports `pipeline.finished` with the contract's `errored` slug. Safe-by-luck before — the event loop filters non-terminal slugs, but nothing protected the machine behind it.
