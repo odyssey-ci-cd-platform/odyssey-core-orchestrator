@@ -276,6 +276,66 @@ func waitGroup(t *testing.T, client *redis.Client, stream string) {
 	t.Fatalf("consumer group on %s never appeared", stream)
 }
 
+// AUD-004: a reclaim re-execution's outcome rides attempt 2 on the same
+// run id — the event loop passes it to the machine instead of dropping it
+// as malformed, and the stage releases. An unreadable attempt is malformed
+// at this boundary: skipped with a trace, the job stays pending.
+func TestEventLoopPassesReclaimAttemptThrough(t *testing.T) {
+	j := &journal{}
+	log := &fakeLogger{}
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	machine := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, log)
+	assignments, err := orchestrator.Segment(mustDecode(t, validEnvelope), "run-1")
+	if err != nil {
+		t.Fatalf("Segment() error = %v, want nil", err)
+	}
+	if err := machine.Start(context.Background(), "run-1", "demo", assignments); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+	eventLoop := orchestrator.NewEventLoop(client, machine, log)
+	eventLoop.Block = 25 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	eventsDone := make(chan error, 1)
+	go func() { eventsDone <- eventLoop.Run(ctx) }()
+	waitGroup(t, client, orchestrator.StreamEvents)
+
+	seedEvent(t, client, mustJSON(t, orchestrator.Event{
+		Type: orchestrator.EventJobFinished, OccurredAt: time.Now().UTC(),
+		RunID: "run-1", Pipeline: "demo", Job: "compile",
+		Payload: map[string]string{"status": orchestrator.StatusPassed, "attempt": "two"},
+	}))
+	seedEvent(t, client, mustJSON(t, orchestrator.Event{
+		Type: orchestrator.EventJobFinished, OccurredAt: time.Now().UTC(),
+		RunID: "run-1", Pipeline: "demo", Job: "compile",
+		Payload: map[string]string{"status": orchestrator.StatusPassed, "attempt": "2"},
+	}))
+
+	waitFor(t, j, 3)
+	waitAcked(t, client, orchestrator.StreamEvents)
+	cancel()
+	select {
+	case err := <-eventsDone:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil on cancellation", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return after cancellation")
+	}
+
+	want := []string{
+		"started:run-1",
+		"assign:run-1:build/compile",
+		"assign:run-1:test/test",
+	}
+	if got := j.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Errorf("journal = %v, want %v (attempt 2 passed through, unreadable attempt skipped)", got, want)
+	}
+	hasLog(t, log, "warn:job.finished outcome carries an unreadable attempt")
+}
+
 // AUD-005: malformed bus entries leave a trace before they are skipped —
 // logged at warn, acknowledged, and never mistaken for the valid event
 // behind them.

@@ -28,8 +28,8 @@ func (s slowAssignments) Publish(_ context.Context, a orchestrator.Assignment) e
 func TestInFlightCountsTrackedRuns(t *testing.T) {
 	j := &journal{}
 	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
-	if n := m.InFlight(); n != 0 {
-		t.Fatalf("InFlight() = %d on a fresh machine, want 0", n)
+	if n := m.InFlightRuns(); n != 0 {
+		t.Fatalf("InFlightRuns() = %d on a fresh machine, want 0", n)
 	}
 
 	a1, err := orchestrator.Segment(mustDecode(t, validEnvelope), "run-1")
@@ -46,8 +46,8 @@ func TestInFlightCountsTrackedRuns(t *testing.T) {
 	if err := m.Start(context.Background(), "run-2", "demo", a2); err != nil {
 		t.Fatalf("Start(run-2) error = %v", err)
 	}
-	if n := m.InFlight(); n != 2 {
-		t.Errorf("InFlight() = %d with two started runs, want 2", n)
+	if n := m.InFlightRuns(); n != 2 {
+		t.Errorf("InFlightRuns() = %d with two started runs, want 2", n)
 	}
 
 	// A single-stage run resolves on its one job's outcome.
@@ -55,11 +55,11 @@ func TestInFlightCountsTrackedRuns(t *testing.T) {
 	if err := m.Start(context.Background(), "run-3", "demo", single); err != nil {
 		t.Fatalf("Start(run-3) error = %v", err)
 	}
-	if err := m.JobFinished(context.Background(), "run-3", "compile", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-3", "compile", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("JobFinished() error = %v", err)
 	}
-	if n := m.InFlight(); n != 2 {
-		t.Errorf("InFlight() = %d after run-3 finished, want 2", n)
+	if n := m.InFlightRuns(); n != 2 {
+		t.Errorf("InFlightRuns() = %d after run-3 finished, want 2", n)
 	}
 }
 
@@ -77,7 +77,7 @@ func TestLastReleaseLatencyIsRecorded(t *testing.T) {
 		t.Fatalf("LastReleaseLatency() = %v before any release, want 0", d)
 	}
 
-	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed); err != nil {
 		t.Fatalf("JobFinished() error = %v", err)
 	}
 	if d := m.LastReleaseLatency(); d < 5*time.Millisecond {
@@ -98,7 +98,7 @@ func TestLastReleaseLatencyUnchangedOnFailedRelease(t *testing.T) {
 	if err := m.Start(context.Background(), "run-1", "demo", assignments); err != nil {
 		t.Fatalf("Start() error = %v", err)
 	}
-	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err == nil {
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed); err == nil {
 		t.Fatalf("JobFinished() error = nil, want the release publish failure")
 	}
 	if d := m.LastReleaseLatency(); d != 0 {

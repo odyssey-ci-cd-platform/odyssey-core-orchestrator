@@ -36,5 +36,6 @@ Run `.agents/bin/check-docs.sh` before committing Markdown changes; CI runs it a
 
 ## 2. Maintenance tasks
 
+- Run-deadline defaults (gh-25, AUD-003): a run whose outcome has not arrived resolves as `errored` at a per-run deadline of **1h** (set in `NewMachine`, overridable at construction; zero or less disables); the reaper scans every **30s** (`ReapInterval`, non-positive disables the ticker). Both are deployment-relevant defaults sized before any load data — revisit them from measured run durations, not taste.
 - The Go gate (vet / `go test -race` since gh-23 / tidy -diff / gofmt) is in the Makefile and CI since gh-5; toolchain bumps go through `go.mod`, not this file.
 - Branch protection on `main` is enabled (required `check` status, strict; admins enforced; stale-review dismissal on; no required approvals — solo merges). It was applied at repository creation, after the bootstrap commit; every later change lands through a PR.

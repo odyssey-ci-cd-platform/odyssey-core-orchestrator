@@ -18,7 +18,7 @@ import (
 // blip reports the error string instead of a stale number.
 func registerMetrics(m *orchestrator.Machine, rdb redis.UniversalClient) {
 	expvar.Publish("orchestrator_inflight_runs", expvar.Func(func() any {
-		return m.InFlight()
+		return m.InFlightRuns()
 	}))
 	expvar.Publish("orchestrator_last_stage_release_ms", expvar.Func(func() any {
 		return float64(m.LastReleaseLatency().Microseconds()) / 1000

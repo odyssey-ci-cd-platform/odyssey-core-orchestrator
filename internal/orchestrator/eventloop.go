@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -122,10 +123,14 @@ func (l *EventLoop) serve(ctx context.Context) error {
 
 // apply feeds one bus entry to the machine when it is a job outcome this
 // boundary can sequence. Malformed entries — no envelope, undecodable
-// JSON, an outcome without its coordinates or status — are logged and
-// acknowledged; other producers' event types and outcomes without
-// terminal status slugs are normal traffic on a shared bus and are
-// acknowledged silently. A machine error is a stage-release publish
+// JSON, an outcome without its coordinates or status, or an unreadable
+// attempt — are logged and acknowledged; other producers' event types and
+// outcomes without terminal status slugs are normal traffic on a shared
+// bus and are acknowledged silently. The attempt rides the payload (the
+// pending contract revision, gh-25): absent means 1 — today's wire — and
+// an attempt above 1 is a reclaim re-execution's outcome, passed through
+// for the machine to accept against its recorded attempt, never dropped
+// as malformed (AUD-004). A machine error is a stage-release publish
 // failure — the entry stays pending and is re-applied by the next start's
 // recovery read (AUD-001).
 func (l *EventLoop) apply(ctx context.Context, envelope any) error {
@@ -156,5 +161,14 @@ func (l *EventLoop) apply(ctx context.Context, envelope any) error {
 	default:
 		return nil // not a terminal slug this machine sequences on
 	}
-	return l.machine.JobFinished(ctx, ev.RunID, ev.Job, status)
+	attempt := 1 // the wire before the pending revision carries no attempt
+	if raw, ok := ev.Payload["attempt"]; ok {
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			l.log.Warn("job.finished outcome carries an unreadable attempt", "run_id", ev.RunID, "job", ev.Job, "attempt", raw)
+			return nil
+		}
+		attempt = n
+	}
+	return l.machine.JobFinished(ctx, ev.RunID, ev.Job, attempt, status)
 }
