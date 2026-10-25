@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -46,13 +47,24 @@ func NewMachine(events EventSink, assignments AssignmentSink) *Machine {
 
 // Start hands off one segmented run: pipeline.started first — the results
 // DB's parent-row invariant — then the first stage only. Later stages wait
-// on JobFinished. A stage-1 publish failure returns the error and leaves
-// nothing behind; emission failures degrade per the platform's policy
-// (dispatcher repo ADR 0001) and never fail the start.
+// on JobFinished. The run registers only after its started event is on the
+// bus (AUD-015): an emission failure aborts the start — the error returns,
+// nothing is tracked, no job is published — because a tracked run whose
+// parent row can never exist is exactly the stranding the invariant
+// forbids. A stage-1 publish failure rolls the run back out of the table.
 func (m *Machine) Start(ctx context.Context, runID, pipeline string, assignments []Assignment) error {
 	stages := groupByStage(assignments)
 	if len(stages) == 0 {
 		return nil // a validated request always has a job; nothing to sequence
+	}
+
+	if err := m.events.Publish(ctx, Event{
+		Type:       EventPipelineStarted,
+		OccurredAt: time.Now(),
+		RunID:      runID,
+		Pipeline:   pipeline,
+	}); err != nil {
+		return fmt.Errorf("emitting pipeline.started for %s: %w", runID, err)
 	}
 
 	r := &run{
@@ -65,17 +77,6 @@ func (m *Machine) Start(ctx context.Context, runID, pipeline string, assignments
 	m.mu.Lock()
 	m.runs[runID] = r
 	m.mu.Unlock()
-
-	if err := m.events.Publish(ctx, Event{
-		Type:       EventPipelineStarted,
-		OccurredAt: time.Now(),
-		RunID:      runID,
-		Pipeline:   pipeline,
-	}); err != nil {
-		// Degradation: never fail a run over emission. v1 has no logger;
-		// process bootstrap wires one.
-		_ = err
-	}
 
 	if err := m.publishStage(ctx, r.stages[0], runID); err != nil {
 		m.mu.Lock()
@@ -169,7 +170,7 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 				delete(m.runs, runID)
 			}
 		} else {
-			finished = r.worst
+			finished = runStatus(r.worst)
 			delete(m.runs, runID)
 		}
 	}
@@ -199,16 +200,30 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 }
 
 // statusRank orders the job outcome slugs the machine sequences on,
-// following the dispatcher's ranking (AUD-010): Errored is worst, then
-// Failed; Passed is best.
+// following the dispatcher's ranking (AUD-010): Errored is worst of the
+// known slugs, then Failed, then Passed. A slug the machine cannot
+// classify ranks worse than Errored (AUD-015) — an unreadable outcome
+// must never be read as success.
 func statusRank(s string) int {
 	switch s {
 	case StatusErrored:
 		return 2
 	case StatusFailed:
 		return 1
+	case StatusPassed:
+		return 0
 	}
-	return 0
+	return 3
+}
+
+// runStatus maps the run's worst outcome onto the contract's
+// pipeline.finished payload slugs (passed/failed/errored): an
+// unclassifiable worst reports as Errored.
+func runStatus(worst string) string {
+	if statusRank(worst) > statusRank(StatusErrored) {
+		return StatusErrored
+	}
+	return worst
 }
 
 // worstStatus returns whichever of a, b ranks worse per statusRank.

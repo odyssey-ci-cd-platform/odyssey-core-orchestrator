@@ -224,25 +224,37 @@ func TestLoopSkipsPoisonEntries(t *testing.T) {
 	}
 }
 
-// The platform's degradation policy (dispatcher repo ADR 0001): emission
-// failures never fail a run — the assignments still hand off.
-func TestLoopPublishesAssignmentsWhenEmitFails(t *testing.T) {
+// AUD-015: the started emission precedes registration — an emission
+// failure aborts the hand-off, the loop returns the error, and the queue
+// entry stays pending, unacknowledged. This rewrites the old
+// degrade-and-hand-off pin: degradation was exactly the stranding AUD-015
+// names — a tracked run whose parent row can never exist.
+func TestLoopLeavesEntryPendingWhenStartedEmitFails(t *testing.T) {
 	j := &journal{failEmit: true}
 	_, client, cancel, done := newTestLoop(t, j)
 	seed(t, client, validEnvelope)
 
-	waitFor(t, j, 2) // the started receipt plus the first stage's assignment
-	waitAcked(t, client, orchestrator.StreamPipelineRequests)
-	stopLoop(t, cancel, done)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run() error = nil, want the started-emission failure to abort the hand-off")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return after the emission failure")
+	}
+	cancel()
 
-	assigns := 0
 	for _, e := range j.snapshot() {
-		if len(e) > len("assign:") && e[:len("assign:")] == "assign:" {
-			assigns++
+		if strings.HasPrefix(e, "assign:") {
+			t.Errorf("journal has %q, want no assignment for an aborted hand-off", e)
 		}
 	}
-	if assigns != 1 {
-		t.Errorf("%d assignments handed off despite the emit failure, want the first stage's one", assigns)
+	pending, err := client.XPending(context.Background(), orchestrator.StreamPipelineRequests, "orchestrator").Result()
+	if err != nil {
+		t.Fatalf("XPending() error = %v", err)
+	}
+	if pending.Count != 1 {
+		t.Errorf("%d entries pending, want the aborted entry left pending", pending.Count)
 	}
 }
 

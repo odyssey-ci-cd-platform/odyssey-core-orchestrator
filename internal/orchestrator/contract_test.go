@@ -79,10 +79,10 @@ func TestRunRequestMatchesContractFixture(t *testing.T) {
 // The envelope's field list is pinned by the contract (§ Event emission
 // responsibilities) and mirrored by the dispatcher repo's internal/domain
 // Event; the fixture carries every field so omitempty cannot hide drift.
+// The example is a dispatcher's job.finished: shape is pinned here, while
+// Event.Validate is this emitter's policy — it refuses event types this
+// repo does not emit, so it does not apply to dispatcher-side examples.
 func TestEventEnvelopeMatchesContractFixture(t *testing.T) {
 	var ev orchestrator.Event
 	roundTrip(t, fixture(t, "event-envelope.json"), &ev)
-	if err := ev.Validate(); err != nil {
-		t.Errorf("the contract's own envelope example fails its field rules: %v", err)
-	}
 }

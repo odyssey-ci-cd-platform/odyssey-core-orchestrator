@@ -78,6 +78,75 @@ func TestEmitWritesEventEnvelope(t *testing.T) {
 	}
 }
 
+// The contract pins each event's envelope fields (§ Event emission
+// responsibilities): every event names its type, run, and pipeline; the two
+// events this repo emits carry exactly their pinned fields — pipeline.started
+// with no job, step, or payload; pipeline.finished with no job or step and a
+// worst-stage status payload (AUD-015).
+func TestEventValidatePinsContractFields(t *testing.T) {
+	cases := []struct {
+		name string
+		ev   orchestrator.Event
+		want string // error substring; empty means valid
+	}{
+		{"valid started", orchestrator.Event{
+			Type: orchestrator.EventPipelineStarted, RunID: "run-1", Pipeline: "demo",
+		}, ""},
+		{"valid finished", orchestrator.Event{
+			Type: orchestrator.EventPipelineFinished, RunID: "run-1", Pipeline: "demo",
+			Payload: map[string]string{"status": orchestrator.StatusPassed},
+		}, ""},
+		{"started without run id", orchestrator.Event{
+			Type: orchestrator.EventPipelineStarted, Pipeline: "demo",
+		}, "run_id must not be empty"},
+		{"finished without pipeline", orchestrator.Event{
+			Type: orchestrator.EventPipelineFinished, RunID: "run-1",
+			Payload: map[string]string{"status": orchestrator.StatusPassed},
+		}, "pipeline must not be empty"},
+		{"started with payload", orchestrator.Event{
+			Type: orchestrator.EventPipelineStarted, RunID: "run-1", Pipeline: "demo",
+			Payload: map[string]string{"stage": "build"},
+		}, "carries no payload"},
+		{"started with job", orchestrator.Event{
+			Type: orchestrator.EventPipelineStarted, RunID: "run-1", Pipeline: "demo",
+			Job: "compile",
+		}, "carries no job or step"},
+		{"finished with step", orchestrator.Event{
+			Type: orchestrator.EventPipelineFinished, RunID: "run-1", Pipeline: "demo",
+			Step:    "compile",
+			Payload: map[string]string{"status": orchestrator.StatusPassed},
+		}, "carries no job or step"},
+		{"finished with unknown status", orchestrator.Event{
+			Type: orchestrator.EventPipelineFinished, RunID: "run-1", Pipeline: "demo",
+			Payload: map[string]string{"status": "detonated"},
+		}, "passed, failed, or errored"},
+		{"finished without status", orchestrator.Event{
+			Type: orchestrator.EventPipelineFinished, RunID: "run-1", Pipeline: "demo",
+		}, "passed, failed, or errored"},
+		{"foreign event type", orchestrator.Event{
+			Type: orchestrator.EventJobFinished, RunID: "run-1", Pipeline: "demo",
+			Job: "compile",
+		}, "unknown event type"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.ev.Validate()
+			if tt.want == "" {
+				if err != nil {
+					t.Fatalf("Validate() error = %v, want nil", err)
+				}
+				return
+			}
+			if err == nil {
+				t.Fatalf("Validate() error = nil, want %q", tt.want)
+			}
+			if !strings.Contains(err.Error(), tt.want) {
+				t.Errorf("error = %q, want it to contain %q", err, tt.want)
+			}
+		})
+	}
+}
+
 // The degradation policy is the platform's (dispatcher repo ADR 0001): the
 // bus never being reachable must not stop execution — but a marshaling
 // failure means the event is silently lost, so the emitter still surfaces

@@ -60,6 +60,9 @@ Who fetches the repository for segmentation: the composer (clone once at intake,
 
 ## References
 
-- Dispatcher repo: ADR 0001 (event bus, two-sink split), ADR 0002 (results DB, central recorder under clustering), ADR 0004 (no local mode)
+- Dispatcher repo (`odyssey-ci-cd-platform/dispatcher`), read at `ed81aa0`:
+    - [ADR 0001: event bus technology](https://github.com/odyssey-ci-cd-platform/dispatcher/blob/ed81aa04214b5774f1281908191bf21850153613/docs/adr/0001-event-bus-technology.md) — the two-sink split
+    - [ADR 0002: results DB technology](https://github.com/odyssey-ci-cd-platform/dispatcher/blob/ed81aa04214b5774f1281908191bf21850153613/docs/adr/0002-results-db-technology.md) — results DB, central recorder under clustering
+    - ADR 0004 (no local mode) — planned in that repo, not yet written as of this citation; there is no text to link
 - Design discussion: odyssey-ci-cd-platform/dispatcher issue 35 and the session of 2026-10-11 that produced the diagram this record formalizes
 - Woodpecker CI agent model (per-node agent, per-job containers) — the closest surveyed analog

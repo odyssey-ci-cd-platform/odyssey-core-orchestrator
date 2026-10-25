@@ -68,7 +68,12 @@ func validCommit(commit string) bool {
 	if len(commit) != 40 {
 		return false
 	}
-	return !strings.ContainsFunc(commit, func(r rune) bool {
-		return !('0' <= r && r <= '9' || 'a' <= r && r <= 'f' || 'A' <= r && r <= 'F')
-	})
+	return !strings.ContainsFunc(commit, func(r rune) bool { return !isHexDigit(r) })
+}
+
+// isHexDigit reports whether r is a hex digit, case-insensitive. Named so
+// the negation stays simple — the inline negated compound tripped
+// staticcheck QF1001 (AUD-015).
+func isHexDigit(r rune) bool {
+	return '0' <= r && r <= '9' || 'a' <= r && r <= 'f' || 'A' <= r && r <= 'F'
 }

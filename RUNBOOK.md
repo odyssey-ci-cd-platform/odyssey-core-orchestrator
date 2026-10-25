@@ -13,8 +13,8 @@ Operational procedures, incidents, and the recorded baseline. Update in the same
 
 ### 1.2 Gate baseline
 
-- Recorded baseline: `make check` green on the gh-5 composer-door commit — docs check plus the Go gate (vet, test, tidy -diff, gofmt).
-- Toolchain at baseline: local `go1.26.8`; `go.mod` pins `go 1.26.4` (the dispatcher repo's floor).
+- Recorded baseline: `make check` green — docs check plus the Go gate (vet, `go test -race` since gh-23, tidy -diff, gofmt).
+- Toolchain at baseline: local `go1.26.8` (auto-upgrades per GOTOOLCHAIN); `go.mod` pins `go 1.26.10` — raised from the dispatcher repo's 1.26.4 floor when govulncheck (gh-23) flagged reachable stdlib fixes at 1.26.5–1.26.10 and CI builds with the go.mod floor.
 
 ### 1.3 Docs check
 
@@ -22,5 +22,5 @@ Run `.agents/bin/check-docs.sh` before committing Markdown changes; CI runs it a
 
 ## 2. Maintenance tasks
 
-- The Go gate (vet / test / tidy -diff / gofmt) is in the Makefile and CI since gh-5; toolchain bumps go through `go.mod`, not this file.
+- The Go gate (vet / `go test -race` since gh-23 / tidy -diff / gofmt) is in the Makefile and CI since gh-5; toolchain bumps go through `go.mod`, not this file.
 - Branch protection on `main` is enabled (required `check` status, strict; admins enforced; stale-review dismissal on; no required approvals — solo merges). It was applied at repository creation, after the bootstrap commit; every later change lands through a PR.
