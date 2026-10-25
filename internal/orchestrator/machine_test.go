@@ -3,6 +3,7 @@ package orchestrator_test
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/odyssey-ci-cd-platform/odyssey-core-orchestrator/internal/orchestrator"
@@ -282,6 +283,33 @@ func TestMachineRanksUnknownSlugWorst(t *testing.T) {
 	}
 }
 
+// AUD-015: the started emission precedes registration — a pipeline.started
+// emission failure aborts the start: the error surfaces (the queue entry
+// stays pending), no assignment is published, and the run is not tracked.
+func TestStartAbortsWhenStartedEmitFails(t *testing.T) {
+	j := &journal{failEmit: true}
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j})
+
+	err := m.Start(context.Background(), "run-1", "demo", singleStageAssignments(t, "run-1"))
+	if err == nil {
+		t.Fatal("Start() error = nil, want the pipeline.started emission failure to abort the start")
+	}
+	for _, e := range j.snapshot() {
+		if strings.HasPrefix(e, "assign:") {
+			t.Errorf("journal has %q, want no assignment published for an aborted start", e)
+		}
+	}
+
+	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+		t.Fatalf("JobFinished() error = %v, want nil", err)
+	}
+	for _, e := range j.snapshot() {
+		if strings.HasPrefix(e, "assign:") {
+			t.Errorf("journal has %q after a later outcome, want the aborted run untracked", e)
+		}
+	}
+}
+
 // After a run ends — or for a run the machine never knew — job outcomes
 // change nothing: no duplicate finishes, no releases.
 func TestMachineIgnoresOutcomesForUntrackedRuns(t *testing.T) {
@@ -306,11 +334,14 @@ func TestMachineIgnoresOutcomesForUntrackedRuns(t *testing.T) {
 // Emission failure on pipeline.finished must not corrupt state: the run is
 // already over, so later outcomes for it change nothing.
 func TestMachineEndsRunEvenWhenFinishedEmitFails(t *testing.T) {
-	j := &journal{failEmit: true}
+	j := &journal{}
 	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j})
 	if err := m.Start(context.Background(), "run-1", "demo", singleStageAssignments(t, "run-1")); err != nil {
 		t.Fatalf("Start() error = %v, want nil", err)
 	}
+	// The started emission succeeded; only the finished emission fails
+	// (since AUD-015 a failing started emission aborts the start itself).
+	j.failEmit = true
 	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
 		t.Fatalf("JobFinished() error = %v, want nil", err)
 	}

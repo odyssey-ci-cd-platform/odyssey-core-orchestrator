@@ -2,6 +2,7 @@ package orchestrator
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"time"
 )
@@ -46,13 +47,24 @@ func NewMachine(events EventSink, assignments AssignmentSink) *Machine {
 
 // Start hands off one segmented run: pipeline.started first — the results
 // DB's parent-row invariant — then the first stage only. Later stages wait
-// on JobFinished. A stage-1 publish failure returns the error and leaves
-// nothing behind; emission failures degrade per the platform's policy
-// (dispatcher repo ADR 0001) and never fail the start.
+// on JobFinished. The run registers only after its started event is on the
+// bus (AUD-015): an emission failure aborts the start — the error returns,
+// nothing is tracked, no job is published — because a tracked run whose
+// parent row can never exist is exactly the stranding the invariant
+// forbids. A stage-1 publish failure rolls the run back out of the table.
 func (m *Machine) Start(ctx context.Context, runID, pipeline string, assignments []Assignment) error {
 	stages := groupByStage(assignments)
 	if len(stages) == 0 {
 		return nil // a validated request always has a job; nothing to sequence
+	}
+
+	if err := m.events.Publish(ctx, Event{
+		Type:       EventPipelineStarted,
+		OccurredAt: time.Now(),
+		RunID:      runID,
+		Pipeline:   pipeline,
+	}); err != nil {
+		return fmt.Errorf("emitting pipeline.started for %s: %w", runID, err)
 	}
 
 	r := &run{
@@ -65,17 +77,6 @@ func (m *Machine) Start(ctx context.Context, runID, pipeline string, assignments
 	m.mu.Lock()
 	m.runs[runID] = r
 	m.mu.Unlock()
-
-	if err := m.events.Publish(ctx, Event{
-		Type:       EventPipelineStarted,
-		OccurredAt: time.Now(),
-		RunID:      runID,
-		Pipeline:   pipeline,
-	}); err != nil {
-		// Degradation: never fail a run over emission. v1 has no logger;
-		// process bootstrap wires one.
-		_ = err
-	}
 
 	if err := m.publishStage(ctx, r.stages[0], runID); err != nil {
 		m.mu.Lock()

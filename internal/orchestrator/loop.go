@@ -106,8 +106,8 @@ func (l *Loop) Run(ctx context.Context) error {
 // handOff turns one queue entry into a machine start. An entry that fails
 // to decode or to re-validate at this trust boundary is poison: nothing is
 // published for it and the caller acknowledges it. A stage-1 publish
-// failure aborts the entry unacknowledged; emission failures degrade
-// inside the machine.
+// failure — and, since AUD-015, a pipeline.started emission failure —
+// aborts the entry unacknowledged.
 func (l *Loop) handOff(ctx context.Context, envelope any) error {
 	body, ok := envelope.(string)
 	if !ok {
