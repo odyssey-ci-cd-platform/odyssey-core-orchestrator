@@ -2,8 +2,8 @@
 // job assignments (dispatcher contract §§ Run request, Job assignment). It
 // owns its consumer-side run-request type outright: the queue is untrusted
 // input, so everything is re-validated here regardless of what the composer
-// published. This slice is pure — bytes in, values out; the queue loop is
-// the next work item.
+// published. This slice is pure — bytes in, values out; the queue loop
+// (loop.go) and the event loop (eventloop.go) drive it.
 package orchestrator
 
 import (

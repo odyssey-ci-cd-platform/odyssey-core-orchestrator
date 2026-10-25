@@ -8,7 +8,7 @@ Not a fork of the execution engine — this repo contains no runner management a
 
 The intake half — the **composer** — is a separate service with its own planned repo: it consumes origin triggers (repo hook, UI, CI), validates the pipeline configuration at the door, and publishes run requests onto the pipeline queue. Services live in separate repos today (small integration tests, exact per-repo style, low PR volume) and consolidate into a monorepo later.
 
-The execution side lives in the **dispatcher** repo (`odyssey-ci-cd-platform/dispatcher`): it consumes the job queue, spawns ephemeral runner containers (one job each), and emits `job.*`/`step.*` events. This README scopes to this repo; everything outside it (composer, triggers, dispatcher, results-recorder, consumer services) appears only as a boundary.
+The execution side lives in the **dispatcher** repo (`odyssey-ci-cd-platform/dispatcher`). What this repo asserts about it is the contract's obligation, not observed behavior: a conforming dispatcher consumes assignments from `odyssey:jobs`, executes each job in an ephemeral runner container (one job each), and emits `job.*`/`step.*` events (dispatcher contract §§ Job assignment, Event emission responsibilities). This README scopes to this repo; everything outside it (composer, triggers, dispatcher, results-recorder, consumer services) appears only as a boundary.
 
 ## Architecture
 
@@ -50,7 +50,7 @@ flowchart LR
 ### Reading notes
 
 - The numbered ordering on the orchestrator's edges is load-bearing: `pipeline.started` is emitted **before** jobs are published, so the results DB's parent-row invariant holds across distributed producers.
-- Assignments carry run context + job spec, **never outcome blobs** — the results DB is the single source of truth for outcomes. It is written by the results-recorder, whose binary is built in the dispatcher repo.
+- Assignments carry run context + job spec, **never outcome blobs** — the results DB is the single source of truth for outcomes. The results-recorder writes it; building that recorder is the dispatcher repo's obligation under its ADR 0002 (the recorder is the results DB's single writer), not a fact this repo verifies.
 - The orchestrator is the one stateful component in the platform (the price of job-grain). v1: a restart loses in-flight runs (ADR 0001); v2: reconciliation rebuilds state from the results DB.
 - No registry and no queue-to-queue dispatcher service are built here: the consumer group is the dispatcher, and capacity gating, claim renewal, and release-on-death are dispatcher-repo mechanics — the contract records the boundary semantics only.
 
