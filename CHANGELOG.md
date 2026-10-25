@@ -6,6 +6,7 @@ Notable changes to odyssey-core-orchestrator. Latest changes go at the top, unde
 
 ### Changed
 - A failed stage release no longer strands a run (gh-20, AUD-001): `Machine.JobFinished` publishes the next stage before committing the advance, so a publish failure rolls the release back — the triggering job returns to the pending set and the redelivered `job.finished` re-applies the outcome instead of finding it consumed (a recovering stage is at-least-once on the job queue); a release that already succeeded stays idempotent under redelivery, and a run whose releasing stage was never published can no longer resolve as `passed`.
+- Both loops recover their consumer group's unacknowledged entries on start (gh-20, AUD-001): before serving new entries, a loop re-reads the group's own pending entries (`XREADGROUP` with ID 0) and re-processes each — a run request whose stage-1 publish failed is re-handed-off under a fresh run id, and a `job.finished` left pending by a failed release is re-applied and acknowledged — so a transient publish failure or a dead process no longer strands a run behind a pending entry. Doc comments that implied a retry stop doing so.
 
 ### Added
 - Audit 1 (gh-19): the audit process (`audit/PROCESS.md`) and the first audit report (`audit/2026-10-17-0547-audit.md`, against `d4589e2`) are recorded in the repository — fifteen findings with evidence, tracked to resolution through the audit issue and its sub-issues.
