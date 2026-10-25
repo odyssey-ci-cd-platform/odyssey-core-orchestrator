@@ -5,6 +5,7 @@ Notable changes to odyssey-core-orchestrator. Latest changes go at the top, unde
 ## [Unreleased]
 
 ### Added
+- A pipeline cross-check at both run-request boundaries (gh-22, AUD-006): `RunRequest.Validate` — the orchestrator's and the composer's — rejects a request whose `pipeline` and `config.pipeline` disagree, so a run is never segmented under a name its own config contradicts.
 - Golden wire fixtures (gh-22, AUD-006): the contract's JSON examples live under `testdata/` as the artifact the composer and dispatcher repositories test against, and exact round-trip tests in every package pin the marshalled shapes byte-for-byte — an unexpected key, a missing key, or a rename fails the suite, replacing the presence-only wire check.
 - Audit 1 (gh-19): the audit process (`audit/PROCESS.md`) and the first audit report (`audit/2026-10-17-0547-audit.md`, against `d4589e2`) are recorded in the repository — fifteen findings with evidence, tracked to resolution through the audit issue and its sub-issues.
 - The event loop (gh-16): consumes the bus on a dedicated `orchestrator` consumer group created at `$` — the bus keeps other producers' history, and runs cannot predate this process, so it never replays. Job-finished events are re-validated at this boundary (coordinates present, terminal status slug) and drive the machine; malformed, foreign, and non-terminal events are acknowledged and skipped. A stage-release publish failure leaves the triggering event pending.

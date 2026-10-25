@@ -46,6 +46,9 @@ func (r RunRequest) Validate() error {
 	if r.Pipeline == "" {
 		errs = append(errs, errors.New("pipeline must not be empty"))
 	}
+	if r.Pipeline != r.Config.Pipeline {
+		errs = append(errs, fmt.Errorf("pipeline %q does not match config.pipeline %q", r.Pipeline, r.Config.Pipeline))
+	}
 	return errors.Join(errs...)
 }
 

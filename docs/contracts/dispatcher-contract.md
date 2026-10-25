@@ -36,7 +36,7 @@ Field rules — all enforced by the composer before publish, re-checked by the o
 - `trigger_id` — non-empty string, opaque; the composer's correlation/dedup handle for the trigger that produced the run (e.g. `hook:42`). The orchestrator never acts on it.
 - `repo` — `org/repo` slug as the dispatcher's source provisioning will fetch it. No full URLs, no protocol prefixes.
 - `commit` — full 40-hex sha. Short shas rejected: a run must be reproducible from its record.
-- `pipeline` — pipeline name from `[pipeline]` in `.odyssey/pipeline.toml`.
+- `pipeline` — pipeline name from `[pipeline]` in `.odyssey/pipeline.toml`. It must equal `config.pipeline`; a request where the two disagree is rejected at both boundaries.
 - `config` — the resolved pipeline configuration as JSON (schema below), attached by the composer.
 
 ### Resolved pipeline configuration (`config`)

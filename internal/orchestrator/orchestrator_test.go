@@ -110,6 +110,11 @@ func TestValidateRejectsEnvelopeViolations(t *testing.T) {
 			want:  "pipeline must not be empty",
 		},
 		{
+			name:  "pipeline disagrees with config.pipeline",
+			mutot: func(r *orchestrator.RunRequest) { r.Config.Pipeline = "other" },
+			want:  `pipeline "demo" does not match config.pipeline "other"`,
+		},
+		{
 			name: "structurally invalid config",
 			mutot: func(r *orchestrator.RunRequest) {
 				bad := r.Config.Jobs["test"]
