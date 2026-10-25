@@ -18,6 +18,7 @@ import (
 type EventLoop struct {
 	client  redis.UniversalClient
 	machine *Machine
+	log     Logger
 
 	// Block is the XREADGROUP block interval; NewEventLoop sets a default.
 	// A deployment config may override it.
@@ -25,9 +26,13 @@ type EventLoop struct {
 }
 
 // NewEventLoop returns an EventLoop reading events through client and
-// driving machine.
-func NewEventLoop(client redis.UniversalClient, machine *Machine) *EventLoop {
-	return &EventLoop{client: client, machine: machine, Block: time.Second}
+// driving machine, logging malformed entries through log (a nil log
+// discards).
+func NewEventLoop(client redis.UniversalClient, machine *Machine, log Logger) *EventLoop {
+	if log == nil {
+		log = discardLogger{}
+	}
+	return &EventLoop{client: client, machine: machine, log: log, Block: time.Second}
 }
 
 // Run serves the event bus until ctx is cancelled. The consumer group
@@ -83,28 +88,34 @@ func (l *EventLoop) Run(ctx context.Context) error {
 }
 
 // apply feeds one bus entry to the machine when it is a job outcome this
-// boundary can sequence, and skips it otherwise: malformed envelopes,
-// other producers' event types, and outcomes without terminal status
-// slugs are acknowledged and forgotten. A machine error is a stage-release
-// publish failure — the entry stays pending and is re-applied by the next
-// start's recovery read (AUD-001).
+// boundary can sequence. Malformed entries — no envelope, undecodable
+// JSON, an outcome without its coordinates or status — are logged and
+// acknowledged; other producers' event types and outcomes without
+// terminal status slugs are normal traffic on a shared bus and are
+// acknowledged silently. A machine error is a stage-release publish
+// failure — the entry stays pending and is re-applied by the next start's
+// recovery read (AUD-001).
 func (l *EventLoop) apply(ctx context.Context, envelope any) error {
 	body, ok := envelope.(string)
 	if !ok {
+		l.log.Warn("event entry has no envelope field")
 		return nil
 	}
 	var ev Event
 	if err := json.Unmarshal([]byte(body), &ev); err != nil {
+		l.log.Warn("event envelope failed to decode", "err", err)
 		return nil
 	}
 	if ev.Type != EventJobFinished {
 		return nil
 	}
 	if ev.RunID == "" || ev.Job == "" {
+		l.log.Warn("job.finished outcome is missing coordinates", "run_id", ev.RunID, "job", ev.Job)
 		return nil // an outcome without its coordinates is unsequenceable
 	}
 	status, ok := ev.Payload["status"]
 	if !ok {
+		l.log.Warn("job.finished outcome carries no status", "run_id", ev.RunID, "job", ev.Job)
 		return nil
 	}
 	switch status {

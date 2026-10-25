@@ -25,6 +25,7 @@ type Machine struct {
 	mu          sync.Mutex
 	events      EventSink
 	assignments AssignmentSink
+	log         Logger
 	runs        map[string]*run
 }
 
@@ -39,10 +40,14 @@ type run struct {
 	worst    string
 }
 
-// NewMachine returns a Machine emitting through events and publishing
-// assignments through assignments.
-func NewMachine(events EventSink, assignments AssignmentSink) *Machine {
-	return &Machine{events: events, assignments: assignments, runs: make(map[string]*run)}
+// NewMachine returns a Machine emitting through events, publishing
+// assignments through assignments, and logging degraded paths through log
+// (a nil log discards).
+func NewMachine(events EventSink, assignments AssignmentSink, log Logger) *Machine {
+	if log == nil {
+		log = discardLogger{}
+	}
+	return &Machine{events: events, assignments: assignments, log: log, runs: make(map[string]*run)}
 }
 
 // Start hands off one segmented run: pipeline.started first — the results
@@ -64,6 +69,9 @@ func (m *Machine) Start(ctx context.Context, runID, pipeline string, assignments
 		RunID:      runID,
 		Pipeline:   pipeline,
 	}); err != nil {
+		// Abort, but leave a trace: the queue entry stays pending and the
+		// error surfaces, yet nothing downstream sees why without this.
+		m.log.Warn("pipeline.started emission failed", "run_id", runID, "err", err)
 		return fmt.Errorf("emitting pipeline.started for %s: %w", runID, err)
 	}
 
@@ -245,8 +253,7 @@ func (m *Machine) emitFinished(ctx context.Context, runID, pipeline, status stri
 		Pipeline:   pipeline,
 		Payload:    map[string]string{"status": status},
 	}); err != nil {
-		// Degradation: never fail a run over emission. v1 has no logger;
-		// process bootstrap wires one.
-		_ = err
+		// Degradation: never fail a run over emission — but leave a trace.
+		m.log.Warn("pipeline.finished emission failed", "run_id", runID, "err", err)
 	}
 }

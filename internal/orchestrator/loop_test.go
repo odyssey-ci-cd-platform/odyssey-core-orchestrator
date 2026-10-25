@@ -2,7 +2,10 @@ package orchestrator_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -62,19 +65,103 @@ func (f fakeAssignments) Publish(_ context.Context, a orchestrator.Assignment) e
 	return nil
 }
 
-func newTestLoop(t *testing.T, j *journal) (*orchestrator.Loop, *redis.Client, context.CancelFunc, <-chan error) {
+// fakeLogger records the degraded-path log lines as "level:msg k=v …"
+// strings, so tests assert what a degraded path made visible.
+type fakeLogger struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *fakeLogger) Warn(msg string, args ...any)  { l.record("warn", msg, args) }
+func (l *fakeLogger) Error(msg string, args ...any) { l.record("error", msg, args) }
+
+func (l *fakeLogger) record(level, msg string, args []any) {
+	line := level + ":" + msg
+	for i := 0; i+1 < len(args); i += 2 {
+		line += fmt.Sprintf(" %v=%v", args[i], args[i+1])
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, line)
+}
+
+func (l *fakeLogger) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return append([]string(nil), l.lines...)
+}
+
+// fakeDeadLetters records dead-letter wraps, or fails when err is set —
+// attempts count the failed ones too.
+type fakeDeadLetters struct {
+	mu       sync.Mutex
+	letter   []orchestrator.DeadLetter
+	attempts int
+	err      error
+}
+
+func (f *fakeDeadLetters) PublishDeadLetter(_ context.Context, d orchestrator.DeadLetter) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.attempts++
+	if f.err != nil {
+		return f.err
+	}
+	f.letter = append(f.letter, d)
+	return nil
+}
+
+func (f *fakeDeadLetters) attempted() bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.attempts > 0
+}
+
+func (f *fakeDeadLetters) snapshot() []orchestrator.DeadLetter {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]orchestrator.DeadLetter(nil), f.letter...)
+}
+
+// hasLog fails the test unless some recorded line contains every fragment.
+func hasLog(t *testing.T, l *fakeLogger, fragments ...string) {
+	t.Helper()
+	for _, line := range l.snapshot() {
+		all := true
+		for _, f := range fragments {
+			if !strings.Contains(line, f) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return
+		}
+	}
+	t.Errorf("no log line contains %v; lines = %v", fragments, l.snapshot())
+}
+
+func newTestLoop(t *testing.T, j *journal, dead *fakeDeadLetters, logs *fakeLogger) (*redis.Client, context.CancelFunc, <-chan error) {
 	t.Helper()
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	loop := orchestrator.NewLoop(client, orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}))
+	var deadSink orchestrator.DeadLetterSink
+	if dead != nil {
+		deadSink = dead
+	}
+	var lg orchestrator.Logger
+	if logs != nil {
+		lg = logs
+	}
+	loop := orchestrator.NewLoop(client, orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil), deadSink, lg)
 	loop.Block = 25 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() { done <- loop.Run(ctx) }()
-	return loop, client, cancel, done
+	return client, cancel, done
 }
 
 // seed adds one queue entry carrying envelope as its single envelope field.
@@ -144,7 +231,7 @@ func startedIDs(entries []string) []string {
 
 func TestLoopHandsOffValidRun(t *testing.T) {
 	j := &journal{}
-	_, client, cancel, done := newTestLoop(t, j)
+	client, cancel, done := newTestLoop(t, j, nil, nil)
 	seed(t, client, validEnvelope)
 
 	waitFor(t, j, 2) // one started + the first stage only
@@ -179,7 +266,7 @@ func runIDOf(assignEntry string) string {
 
 func TestLoopAssignsFreshRunIDPerRun(t *testing.T) {
 	j := &journal{}
-	_, client, cancel, done := newTestLoop(t, j)
+	client, cancel, done := newTestLoop(t, j, nil, nil)
 	seed(t, client, validEnvelope)
 	seed(t, client, validEnvelope)
 
@@ -208,7 +295,7 @@ func TestLoopSkipsPoisonEntries(t *testing.T) {
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			j := &journal{}
-			_, client, cancel, done := newTestLoop(t, j)
+			client, cancel, done := newTestLoop(t, j, &fakeDeadLetters{}, &fakeLogger{})
 			seed(t, client, tt.poison)
 			seed(t, client, validEnvelope)
 
@@ -231,7 +318,7 @@ func TestLoopSkipsPoisonEntries(t *testing.T) {
 // names — a tracked run whose parent row can never exist.
 func TestLoopLeavesEntryPendingWhenStartedEmitFails(t *testing.T) {
 	j := &journal{failEmit: true}
-	_, client, cancel, done := newTestLoop(t, j)
+	client, cancel, done := newTestLoop(t, j, nil, nil)
 	seed(t, client, validEnvelope)
 
 	select {
@@ -270,8 +357,8 @@ func TestLoopRecoversUnacknowledgedRunAfterRestart(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	machine := orchestrator.NewMachine(fakeEvents{j}, sink)
-	loop := orchestrator.NewLoop(client, machine)
+	machine := orchestrator.NewMachine(fakeEvents{j}, sink, nil)
+	loop := orchestrator.NewLoop(client, machine, &fakeDeadLetters{}, nil)
 	loop.Block = 25 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -302,7 +389,7 @@ func TestLoopRecoversUnacknowledgedRunAfterRestart(t *testing.T) {
 	// entry off under a fresh run id.
 	sink.failStage = ""
 	recovered := make(chan error, 1)
-	restarted := orchestrator.NewLoop(client, machine)
+	restarted := orchestrator.NewLoop(client, machine, &fakeDeadLetters{}, nil)
 	restarted.Block = 25 * time.Millisecond
 	go func() { recovered <- restarted.Run(ctx) }()
 
@@ -335,12 +422,122 @@ func TestLoopRecoversUnacknowledgedRunAfterRestart(t *testing.T) {
 	}
 }
 
+// AUD-005: a poison run request is dead-lettered with a reason — never
+// silently dropped (contract § Run request) — and logged, while the runs
+// behind it still hand off.
+func TestLoopDeadLettersPoisonEntries(t *testing.T) {
+	validationPoison := strings.Replace(validEnvelope,
+		"8f3a1c4d5e6f708192a3b4c5d6e7f8091a2b3c4d", "shortsha", 1)
+	cases := []struct {
+		name       string
+		noEnvelope bool
+		poison     string
+		want       orchestrator.DeadLetter
+		logLine    string
+	}{
+		{
+			name:    "undecodable",
+			poison:  "not json {{",
+			want:    orchestrator.DeadLetter{Reason: orchestrator.DeadReasonDecode, Raw: "not json {{"},
+			logLine: "warn:run request failed to decode",
+		},
+		{
+			name:    "fails re-validation",
+			poison:  validationPoison,
+			want:    orchestrator.DeadLetter{Reason: orchestrator.DeadReasonValidation, Request: json.RawMessage(validationPoison)},
+			logLine: "warn:run request failed re-validation",
+		},
+		{
+			name:       "no envelope field",
+			noEnvelope: true,
+			want:       orchestrator.DeadLetter{Reason: orchestrator.DeadReasonDecode},
+			logLine:    "warn:run request entry has no envelope field",
+		},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			j := &journal{}
+			dead := &fakeDeadLetters{}
+			log := &fakeLogger{}
+			client, cancel, done := newTestLoop(t, j, dead, log)
+			if tt.noEnvelope {
+				if err := client.XAdd(context.Background(), &redis.XAddArgs{
+					Stream: orchestrator.StreamPipelineRequests,
+					Values: map[string]any{"other": "not an envelope"},
+				}).Err(); err != nil {
+					t.Fatalf("XAdd() error = %v", err)
+				}
+			} else {
+				seed(t, client, tt.poison)
+			}
+			seed(t, client, validEnvelope)
+
+			waitFor(t, j, 2) // only the valid run's hand-off
+			waitAcked(t, client, orchestrator.StreamPipelineRequests)
+			stopLoop(t, cancel, done)
+
+			got := dead.snapshot()
+			if len(got) != 1 || !reflect.DeepEqual(got[0], tt.want) {
+				t.Errorf("dead letters = %+v, want [%+v]", got, tt.want)
+			}
+			hasLog(t, log, tt.logLine)
+			ids := startedIDs(j.snapshot())
+			if len(ids) != 1 {
+				t.Errorf("started ids = %v, want exactly the valid run (poison produced no run)", ids)
+			}
+		})
+	}
+}
+
+// A trace that cannot be written is not dropped either: a failed
+// dead-letter write leaves the entry unacknowledged, surfaces the error,
+// and logs it.
+func TestLoopKeepsEntryPendingWhenDeadLetterFails(t *testing.T) {
+	j := &journal{}
+	dead := &fakeDeadLetters{err: errors.New("dead stream unwritable")}
+	log := &fakeLogger{}
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	loop := orchestrator.NewLoop(client, orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil), dead, log)
+	loop.Block = 25 * time.Millisecond
+	seed(t, client, "not json {{")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- loop.Run(ctx) }()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && !dead.attempted() {
+		time.Sleep(5 * time.Millisecond)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "dead-lettering run request") {
+			t.Fatalf("Run() error = %v, want the dead-letter failure", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return after the dead-letter failure")
+	}
+
+	pending, err := client.XPending(context.Background(), orchestrator.StreamPipelineRequests, "orchestrator").Result()
+	if err != nil {
+		t.Fatalf("XPending() error = %v", err)
+	}
+	if pending.Count != 1 {
+		t.Errorf("pending count = %d, want 1 (the poison entry stays unacknowledged)", pending.Count)
+	}
+	hasLog(t, log, "error:run request dead-letter write failed")
+}
+
 func TestLoopStopsWhenContextCancelledBeforeStart(t *testing.T) {
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 
-	loop := orchestrator.NewLoop(client, orchestrator.NewMachine(fakeEvents{&journal{}}, fakeAssignments{&journal{}}))
+	loop := orchestrator.NewLoop(client, orchestrator.NewMachine(fakeEvents{&journal{}}, fakeAssignments{&journal{}}, nil), nil, nil)
 	loop.Block = 25 * time.Millisecond
 
 	ctx, cancel := context.WithCancel(context.Background())

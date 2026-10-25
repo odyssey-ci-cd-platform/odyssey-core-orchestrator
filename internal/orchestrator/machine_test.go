@@ -17,7 +17,7 @@ import (
 
 func TestStartPublishesOnlyFirstStage(t *testing.T) {
 	j := &journal{}
-	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j})
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
 	assignments, err := orchestrator.Segment(mustDecode(t, validEnvelope), "run-1")
 	if err != nil {
 		t.Fatalf("Segment() error = %v, want nil", err)
@@ -37,7 +37,7 @@ func TestStartPublishesOnlyFirstStage(t *testing.T) {
 // under the same run id (ADR 0001: releases stage N+1 on success).
 func TestMachineReleasesNextStageWhenStagePasses(t *testing.T) {
 	j := &journal{}
-	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j})
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
 	assignments, err := orchestrator.Segment(mustDecode(t, validEnvelope), "run-1")
 	if err != nil {
 		t.Fatalf("Segment() error = %v, want nil", err)
@@ -79,7 +79,7 @@ func singleStageAssignments(t *testing.T, runID string) []orchestrator.Assignmen
 // responsibilities).
 func TestMachineFinishesSingleStageRun(t *testing.T) {
 	j := &journal{}
-	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j})
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
 	if err := m.Start(context.Background(), "run-1", "demo", singleStageAssignments(t, "run-1")); err != nil {
 		t.Fatalf("Start() error = %v, want nil", err)
 	}
@@ -102,7 +102,7 @@ func TestMachineFinishesSingleStageRun(t *testing.T) {
 // releases or finishes another.
 func TestMachineSequencesRunsIndependently(t *testing.T) {
 	j := &journal{}
-	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j})
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
 	if err := m.Start(context.Background(), "run-1", "demo", singleStageAssignments(t, "run-1")); err != nil {
 		t.Fatalf("Start(run-1) error = %v, want nil", err)
 	}
@@ -148,7 +148,7 @@ func twoJobFirstStageAssignments(t *testing.T, runID string) []orchestrator.Assi
 // pipeline.finished carries `failed`, and no later stage is released.
 func TestMachineEndsRunOnFailedStage(t *testing.T) {
 	j := &journal{}
-	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j})
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
 	assignments, err := orchestrator.Segment(mustDecode(t, validEnvelope), "run-1")
 	if err != nil {
 		t.Fatalf("Segment() error = %v, want nil", err)
@@ -177,7 +177,7 @@ func TestMachineEndsRunOnFailedStage(t *testing.T) {
 // stage's worst status.
 func TestMachineWaitsForFullStageResolution(t *testing.T) {
 	j := &journal{}
-	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j})
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
 	if err := m.Start(context.Background(), "run-1", "demo", twoJobFirstStageAssignments(t, "run-1")); err != nil {
 		t.Fatalf("Start() error = %v, want nil", err)
 	}
@@ -218,7 +218,7 @@ func TestMachineReportsErroredAsWorst(t *testing.T) {
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			j := &journal{}
-			m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j})
+			m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
 			if err := m.Start(context.Background(), "run-1", "demo", twoJobFirstStageAssignments(t, "run-1")); err != nil {
 				t.Fatalf("Start() error = %v, want nil", err)
 			}
@@ -260,7 +260,7 @@ func TestMachineRanksUnknownSlugWorst(t *testing.T) {
 	for _, tt := range cases {
 		t.Run(tt.name, func(t *testing.T) {
 			j := &journal{}
-			m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j})
+			m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
 			if err := m.Start(context.Background(), "run-1", "demo", twoJobFirstStageAssignments(t, "run-1")); err != nil {
 				t.Fatalf("Start() error = %v, want nil", err)
 			}
@@ -289,7 +289,7 @@ func TestMachineRanksUnknownSlugWorst(t *testing.T) {
 // stays pending), no assignment is published, and the run is not tracked.
 func TestStartAbortsWhenStartedEmitFails(t *testing.T) {
 	j := &journal{failEmit: true}
-	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j})
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
 
 	err := m.Start(context.Background(), "run-1", "demo", singleStageAssignments(t, "run-1"))
 	if err == nil {
@@ -315,7 +315,7 @@ func TestStartAbortsWhenStartedEmitFails(t *testing.T) {
 // change nothing: no duplicate finishes, no releases.
 func TestMachineIgnoresOutcomesForUntrackedRuns(t *testing.T) {
 	j := &journal{}
-	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j})
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
 	if err := m.Start(context.Background(), "run-1", "demo", singleStageAssignments(t, "run-1")); err != nil {
 		t.Fatalf("Start() error = %v, want nil", err)
 	}
@@ -332,11 +332,54 @@ func TestMachineIgnoresOutcomesForUntrackedRuns(t *testing.T) {
 	}
 }
 
+// A nil logger degrades to discarding: the degraded paths never panic and
+// never fail the run.
+func TestMachineToleratesNilLogger(t *testing.T) {
+	j := &journal{}
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
+	if err := m.Start(context.Background(), "run-1", "demo", singleStageAssignments(t, "run-1")); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+		t.Fatalf("JobFinished() error = %v, want nil", err)
+	}
+
+	want := []string{"started:run-1", "assign:run-1:build/compile", "finished:run-1:passed"}
+	if got := j.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Errorf("journal = %v, want %v (the discard logger changes nothing)", got, want)
+	}
+}
+
+// AUD-005: a degraded emission leaves a trace through the logger seam —
+// visible with the run id, without failing the run (the platform's
+// degradation policy, dispatcher repo ADR 0001). Since AUD-015 a failing
+// pipeline.started aborts the start instead of degrading — that abort is
+// traced too, and the finished emission keeps the degrade policy.
+func TestMachineLogsDegradedEmissions(t *testing.T) {
+	j := &journal{failEmit: true}
+	log := &fakeLogger{}
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, log)
+	if err := m.Start(context.Background(), "run-1", "demo", singleStageAssignments(t, "run-1")); err == nil {
+		t.Fatal("Start() error = nil, want the started-emission abort")
+	}
+	hasLog(t, log, "warn:pipeline.started emission failed", "run_id=run-1")
+
+	j.failEmit = false
+	if err := m.Start(context.Background(), "run-2", "demo", singleStageAssignments(t, "run-2")); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+	j.failEmit = true
+	if err := m.JobFinished(context.Background(), "run-2", "compile", orchestrator.StatusPassed); err != nil {
+		t.Fatalf("JobFinished() error = %v, want nil", err)
+	}
+	hasLog(t, log, "warn:pipeline.finished emission failed", "run_id=run-2")
+}
+
 // Emission failure on pipeline.finished must not corrupt state: the run is
 // already over, so later outcomes for it change nothing.
 func TestMachineEndsRunEvenWhenFinishedEmitFails(t *testing.T) {
 	j := &journal{}
-	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j})
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
 	if err := m.Start(context.Background(), "run-1", "demo", singleStageAssignments(t, "run-1")); err != nil {
 		t.Fatalf("Start() error = %v, want nil", err)
 	}
@@ -379,7 +422,7 @@ func (f *flakyAssignments) Publish(_ context.Context, a orchestrator.Assignment)
 func TestMachineRetriesReleaseAfterFailedPublish(t *testing.T) {
 	j := &journal{}
 	sink := &flakyAssignments{j: j, failStage: "test"}
-	m := orchestrator.NewMachine(fakeEvents{j}, sink)
+	m := orchestrator.NewMachine(fakeEvents{j}, sink, nil)
 	assignments, err := orchestrator.Segment(mustDecode(t, validEnvelope), "run-1")
 	if err != nil {
 		t.Fatalf("Segment() error = %v, want nil", err)
@@ -418,7 +461,7 @@ func TestMachineRetriesReleaseAfterFailedPublish(t *testing.T) {
 // longer pending, so the duplicate is ignored.
 func TestMachineReleaseIsNotDuplicatedByRedelivery(t *testing.T) {
 	j := &journal{}
-	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j})
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
 	assignments, err := orchestrator.Segment(mustDecode(t, validEnvelope), "run-1")
 	if err != nil {
 		t.Fatalf("Segment() error = %v, want nil", err)

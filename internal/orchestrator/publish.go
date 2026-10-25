@@ -16,11 +16,43 @@ const (
 	// § Streams).
 	StreamJobs = "odyssey:jobs"
 
+	// StreamPipelineRequestsDead is where poison run requests land for
+	// human inspection (contract § Streams): a discarded request is a
+	// vanished user run — never a silent one.
+	StreamPipelineRequestsDead = "odyssey:pipeline-requests-dead"
+
 	// MaxStreamLen bounds retention via approximate XADD trimming
 	// (contract § Delivery parameters): the queue carries work, not
 	// history. A deployment config may override the default.
 	MaxStreamLen = 100000
+
+	// maxDeadLen bounds retention on the dead stream (contract § Delivery
+	// parameters): an inspection queue, small by design.
+	maxDeadLen = 1000
 )
+
+// Dead-letter reasons (contract § Run request: the dead-letter wrap's
+// reason field, mirroring odyssey:jobs-dead's).
+const (
+	// DeadReasonDecode marks an entry whose run request could not be
+	// read: no envelope field, or bytes that are not JSON.
+	DeadReasonDecode = "decode"
+
+	// DeadReasonValidation marks a decodable request that failed
+	// re-validation at this trust boundary.
+	DeadReasonValidation = "validation"
+)
+
+// DeadLetter is the dead-letter wrap for a discarded run request,
+// mirroring odyssey:jobs-dead: a reason plus the original. Request embeds
+// the original envelope when it was decodable JSON; Raw carries the
+// original entry's bytes when it was not; an entry with no envelope field
+// carries the reason alone.
+type DeadLetter struct {
+	Reason  string          `json:"reason"`
+	Request json.RawMessage `json:"request,omitempty"`
+	Raw     string          `json:"raw,omitempty"`
+}
 
 // Publisher writes job assignments onto the job queue.
 type Publisher struct {
@@ -84,6 +116,22 @@ func (p *Publisher) Publish(ctx context.Context, a Assignment) error {
 	return p.client.XAdd(ctx, &redis.XAddArgs{
 		Stream: StreamJobs,
 		MaxLen: MaxStreamLen,
+		Approx: true,
+		Values: map[string]any{"envelope": string(body)},
+	}).Err()
+}
+
+// PublishDeadLetter writes one dead-letter wrap as the stream entry's
+// single envelope field — the same bus convention as every other queue,
+// bounded at the contract's inspection-queue trim default.
+func (p *Publisher) PublishDeadLetter(ctx context.Context, d DeadLetter) error {
+	body, err := json.Marshal(d)
+	if err != nil {
+		return err
+	}
+	return p.client.XAdd(ctx, &redis.XAddArgs{
+		Stream: StreamPipelineRequestsDead,
+		MaxLen: maxDeadLen,
 		Approx: true,
 		Values: map[string]any{"envelope": string(body)},
 	}).Err()

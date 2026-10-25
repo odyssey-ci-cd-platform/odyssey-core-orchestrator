@@ -11,6 +11,7 @@ Two queues and one event bus bind this repo to the dispatcher repo. The event en
 | Stream | Publisher | Consumer | Semantics |
 |---|---|---|---|
 | `odyssey:pipeline-requests` | composer | orchestrator | run requests; one pipeline run each |
+| `odyssey:pipeline-requests-dead` | orchestrator | human inspection | dead-lettered run requests, wrapped with a reason; never silently dropped |
 | `odyssey:jobs` | orchestrator | dispatchers (shared consumer group `dispatchers`) | job assignments; ack on job completion |
 | `odyssey:jobs-dead` | dispatchers | human inspection | dead-lettered assignments, wrapped with a reason; never silently dropped |
 | `odyssey:events` | orchestrator + dispatchers | orchestrator, results-recorder, consumer services | lifecycle events, existing envelope |
@@ -38,6 +39,12 @@ Field rules — all enforced by the composer before publish, re-checked by the o
 - `commit` — full 40-hex sha. Short shas rejected: a run must be reproducible from its record.
 - `pipeline` — pipeline name from `[pipeline]` in `.odyssey/pipeline.toml`. It must equal `config.pipeline`; a request where the two disagree is rejected at both boundaries.
 - `config` — the resolved pipeline configuration as JSON (schema below), attached by the composer.
+
+### Dead-letter at the orchestrator's trust boundary
+
+A queue entry is untrusted input, and the composer is fire-and-forget: an entry the orchestrator cannot act on is dead-lettered, never silently dropped.
+The orchestrator dead-letters an entry that carries no `envelope` field, whose envelope is not valid JSON, or whose run request fails re-validation at its trust boundary.
+Dead-letter entries on `odyssey:pipeline-requests-dead` wrap the original, mirroring `odyssey:jobs-dead`: `{ "reason": "decode" | "validation", "request": { …original envelope JSON… } }`, with the original entry's bytes in a `raw` string instead of `request` when the envelope is not decodable JSON; an entry with no `envelope` field carries the reason alone.
 
 ### Resolved pipeline configuration (`config`)
 
@@ -137,5 +144,6 @@ The envelope is the dispatcher repo's `internal/domain` `Event` JSON (`type`, `o
 | `MAXLEN`, `odyssey:pipeline-requests` | 10,000 | work, not history; sized well past any plausible backlog spike |
 | `MAXLEN`, `odyssey:jobs` | 100,000 | one entry per job; sized for bursty stages |
 | `MAXLEN`, `odyssey:jobs-dead` | 1,000 | inspection queue; small by design |
+| `MAXLEN`, `odyssey:pipeline-requests-dead` | 1,000 | inspection queue; small by design |
 
 These are defaults for a system with no load data yet. The deployment config overrides them; revisiting them from measured data is the trigger, not taste.

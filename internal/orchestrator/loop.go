@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -40,6 +41,28 @@ type AssignmentSink interface {
 	Publish(ctx context.Context, a Assignment) error
 }
 
+// DeadLetterSink is where poison run requests land. The consumer package
+// owns the seam; *Publisher satisfies it. A Loop requires one: a nil sink
+// would turn every poison entry back into a silent drop.
+type DeadLetterSink interface {
+	PublishDeadLetter(ctx context.Context, d DeadLetter) error
+}
+
+// Logger is where degraded paths leave a trace: emission failures, poison
+// entries, failed dead-letter writes. The consumer package owns the seam;
+// *slog.Logger satisfies it.
+type Logger interface {
+	Warn(msg string, args ...any)
+	Error(msg string, args ...any)
+}
+
+// discardLogger drops every line — the nil-logger default, so a caller
+// without logging wiring degrades instead of panicking.
+type discardLogger struct{}
+
+func (discardLogger) Warn(string, ...any)  {}
+func (discardLogger) Error(string, ...any) {}
+
 // Loop consumes run requests from the pipeline queue and hands each off to
 // the machine, which sequences the run's stages. It holds no run state:
 // every entry is one decode-validate-segment, and the queue's consumer
@@ -47,16 +70,22 @@ type AssignmentSink interface {
 type Loop struct {
 	client  redis.UniversalClient
 	machine *Machine
+	dead    DeadLetterSink
+	log     Logger
 
 	// Block is the XREADGROUP block interval; NewLoop sets a default. A
 	// deployment config may override it.
 	Block time.Duration
 }
 
-// NewLoop returns a Loop reading entries through client and handing runs
-// off to machine.
-func NewLoop(client redis.UniversalClient, machine *Machine) *Loop {
-	return &Loop{client: client, machine: machine, Block: time.Second}
+// NewLoop returns a Loop reading entries through client, handing runs off
+// to machine, dead-lettering poison entries through dead, and logging
+// degraded paths through log (a nil log discards).
+func NewLoop(client redis.UniversalClient, machine *Machine, dead DeadLetterSink, log Logger) *Loop {
+	if log == nil {
+		log = discardLogger{}
+	}
+	return &Loop{client: client, machine: machine, dead: dead, log: log, Block: time.Second}
 }
 
 // recoverPending re-reads the consumer group's own pending entries
@@ -101,9 +130,9 @@ func recoverPending(ctx context.Context, client redis.UniversalClient, stream st
 
 // Run serves the pipeline queue until ctx is cancelled. It returns nil on
 // cancellation and the first infrastructure error otherwise; a poison
-// entry is neither — it is skipped, so one bad queue entry cannot stop the
-// runs behind it. On start the loop first recovers its group's own
-// unacknowledged entries (recoverPending).
+// entry is neither — it is dead-lettered with a reason, so one bad queue
+// entry cannot stop the runs behind it. On start the loop first recovers
+// its group's own unacknowledged entries (recoverPending).
 func (l *Loop) Run(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return nil
@@ -150,26 +179,41 @@ func (l *Loop) Run(ctx context.Context) error {
 }
 
 // handOff turns one queue entry into a machine start. An entry that fails
-// to decode or to re-validate at this trust boundary is poison: nothing is
-// published for it and the caller acknowledges it. A stage-1 publish
-// failure — and, since AUD-015, a pipeline.started emission failure —
-// aborts the entry unacknowledged.
+// to decode or to re-validate at this trust boundary is poison: it is
+// dead-lettered with a reason — never silently dropped (contract § Run
+// request) — and the caller acknowledges it. A stage-1 publish failure —
+// and, since AUD-015, a pipeline.started emission failure — aborts the
+// entry unacknowledged; emission failures degrade inside the machine.
 func (l *Loop) handOff(ctx context.Context, envelope any) error {
 	body, ok := envelope.(string)
 	if !ok {
-		return nil // no envelope field: nothing to validate, nothing to publish
+		l.log.Warn("run request entry has no envelope field")
+		return l.deadLetter(ctx, DeadLetter{Reason: DeadReasonDecode})
 	}
 	req, err := DecodeRunRequest([]byte(body))
 	if err != nil {
-		return nil
+		l.log.Warn("run request failed to decode", "err", err)
+		return l.deadLetter(ctx, DeadLetter{Reason: DeadReasonDecode, Raw: body})
 	}
 	runID := newRunID()
 	assignments, err := Segment(req, runID)
 	if err != nil {
-		return nil
+		l.log.Warn("run request failed re-validation", "err", err)
+		return l.deadLetter(ctx, DeadLetter{Reason: DeadReasonValidation, Request: json.RawMessage(body)})
 	}
 	if err := l.machine.Start(ctx, runID, req.Pipeline, assignments); err != nil {
 		return err
+	}
+	return nil
+}
+
+// deadLetter publishes one poison wrap. A failed dead-letter write is an
+// infrastructure failure like any other: the error surfaces so the entry
+// stays unacknowledged — a trace that cannot be written is not dropped.
+func (l *Loop) deadLetter(ctx context.Context, d DeadLetter) error {
+	if err := l.dead.PublishDeadLetter(ctx, d); err != nil {
+		l.log.Error("run request dead-letter write failed", "reason", d.Reason, "err", err)
+		return fmt.Errorf("dead-lettering run request: %w", err)
 	}
 	return nil
 }
