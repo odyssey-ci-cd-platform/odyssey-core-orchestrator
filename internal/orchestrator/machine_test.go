@@ -499,6 +499,41 @@ func TestMachineAcceptsReclaimAttemptOutcome(t *testing.T) {
 	}
 }
 
+// AUD-013's observability ask, scoped by gh-25: the machine exposes its
+// in-flight run count — tracked runs, started but unresolved — for gh-24's
+// metrics/health wiring to read. No HTTP or metrics wiring here.
+func TestMachineInFlightRuns(t *testing.T) {
+	j := &journal{}
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j}, nil)
+	if got := m.InFlightRuns(); got != 0 {
+		t.Fatalf("InFlightRuns() = %d, want 0 before any run", got)
+	}
+	if err := m.Start(context.Background(), "run-1", "demo", singleStageAssignments(t, "run-1")); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+	if err := m.Start(context.Background(), "run-2", "demo", singleStageAssignments(t, "run-2")); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+	if got := m.InFlightRuns(); got != 2 {
+		t.Fatalf("InFlightRuns() = %d, want 2 with two runs in flight", got)
+	}
+	if err := m.JobFinished(context.Background(), "run-1", "compile", 1, orchestrator.StatusPassed); err != nil {
+		t.Fatalf("JobFinished() error = %v, want nil", err)
+	}
+	if got := m.InFlightRuns(); got != 1 {
+		t.Fatalf("InFlightRuns() = %d, want 1 after run-1 resolved", got)
+	}
+
+	// A deadline resolution drops the count too.
+	clock := &fakeClock{now: time.Now()}
+	m.Clock = clock.Now
+	clock.Advance(2 * time.Hour)
+	m.Reap(context.Background())
+	if got := m.InFlightRuns(); got != 0 {
+		t.Fatalf("InFlightRuns() = %d, want 0 after the deadline resolution", got)
+	}
+}
+
 // fakeClock is the reaper's injectable time source (AUD-003): tests
 // advance it past a run's deadline without sleeping.
 type fakeClock struct {

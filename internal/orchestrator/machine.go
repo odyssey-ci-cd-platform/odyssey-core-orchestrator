@@ -135,6 +135,17 @@ func (m *Machine) publishStage(ctx context.Context, stage []Assignment, runID st
 	return nil
 }
 
+// InFlightRuns reports how many runs the machine currently tracks —
+// started but unresolved (gh-25, AUD-013's observability ask). The count
+// covers runs awaiting outcomes and runs awaiting their deadline; gh-24's
+// wiring reads it for metrics/health. This method is the whole seam — no
+// HTTP or metrics code lives here.
+func (m *Machine) InFlightRuns() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.runs)
+}
+
 // Reap resolves every tracked run whose deadline has passed: it ends the
 // run with pipeline.finished carrying errored and evicts it (AUD-003) —
 // a lost or delayed job.finished delays a run's resolution but cannot
