@@ -14,7 +14,7 @@ Operational procedures, incidents, and the recorded baseline. Update in the same
 ### 1.2 Gate baseline
 
 - Recorded baseline: `make check` green — docs check plus the Go gate (vet, `go test -race` since gh-23, tidy -diff, gofmt).
-- Toolchain at baseline: local `go1.26.8`; `go.mod` pins `go 1.26.4` (the dispatcher repo's floor).
+- Toolchain at baseline: local `go1.26.8`; `go.mod` pins `go 1.26.8` — raised from the dispatcher repo's 1.26.4 floor when govulncheck (gh-23) flagged reachable stdlib fixes at 1.26.5/1.26.6 and CI builds with the go.mod floor.
 
 ### 1.3 Docs check
 

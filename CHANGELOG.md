@@ -10,6 +10,7 @@ Notable changes to odyssey-core-orchestrator. Latest changes go at the top, unde
 
 ### Added
 - CI lint, vulnerability, and dependency automation (gh-23, AUD-011): `golangci-lint` (v2.15.0) and `govulncheck` (v1.9.0) run as separate pinned-version steps beside the gate — plain `go run pkg@version`, the same commands verifiable locally — and a minimal Dependabot config keeps `go.mod` and the pinned workflow actions current (weekly).
+- Toolchain floor raised to `go 1.26.8` (gh-23, AUD-011): govulncheck flagged reachable stdlib fixes at 1.26.5/1.26.6, and CI builds with the go.mod floor — the pinned floor now carries the fixes instead of compiling known-vulnerable stdlib.
 - Config validation in the composer's Publish (gh-22, AUD-006): the publisher validates the attached resolved configuration before enqueueing — the door holds at the wire for the whole request, not just the envelope.
 - A pipeline cross-check at both run-request boundaries (gh-22, AUD-006): `RunRequest.Validate` — the orchestrator's and the composer's — rejects a request whose `pipeline` and `config.pipeline` disagree, so a run is never segmented under a name its own config contradicts.
 - Golden wire fixtures (gh-22, AUD-006): the contract's JSON examples live under `testdata/` as the artifact the composer and dispatcher repositories test against, and exact round-trip tests in every package pin the marshalled shapes byte-for-byte — an unexpected key, a missing key, or a rename fails the suite, replacing the presence-only wire check.
