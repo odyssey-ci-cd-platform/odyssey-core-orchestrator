@@ -36,7 +36,11 @@ func (h *Health) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 		err, at := s.LastError()
 		// Every loop is represented, cleanly serving ones with an empty
 		// error — the body self-describes what is being watched.
-		loops[name] = loopErrorJSON{LastError: err, At: at.UTC().Format(time.RFC3339)}
+		entry := loopErrorJSON{LastError: err}
+		if err != "" {
+			entry.At = at.UTC().Format(time.RFC3339)
+		}
+		loops[name] = entry
 	}
 
 	status, code := "ok", http.StatusOK
