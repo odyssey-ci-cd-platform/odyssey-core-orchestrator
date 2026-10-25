@@ -2,6 +2,7 @@ package orchestrator_test
 
 import (
 	"context"
+	"errors"
 	"reflect"
 	"testing"
 
@@ -278,5 +279,88 @@ func TestMachineEndsRunEvenWhenFinishedEmitFails(t *testing.T) {
 
 	if got := j.snapshot(); !reflect.DeepEqual(got, before) {
 		t.Errorf("journal = %v, want unchanged (%v) — the run ended despite the emission failure", got, before)
+	}
+}
+
+// flakyAssignments fails every publish for one stage name — the transient
+// release failure AUD-001 reproduces with. The test clears failStage to
+// model the failure clearing.
+type flakyAssignments struct {
+	j         *journal
+	failStage string // publishes for this stage fail; empty means none fail
+}
+
+func (f *flakyAssignments) Publish(_ context.Context, a orchestrator.Assignment) error {
+	if a.Stage == f.failStage {
+		return errors.New("redis down")
+	}
+	f.j.record("assign:" + a.RunID + ":" + a.Stage + "/" + a.Job)
+	return nil
+}
+
+// AUD-001: a stage-release publish failure must not strand the run. The
+// failing publish surfaces the error with the run state rolled back — the
+// triggering job stays pending — so the outcome's unacknowledged entry,
+// redelivered once the failure clears, re-applies the outcome and the
+// release goes through; the run then finishes normally.
+func TestMachineRetriesReleaseAfterFailedPublish(t *testing.T) {
+	j := &journal{}
+	sink := &flakyAssignments{j: j, failStage: "test"}
+	m := orchestrator.NewMachine(fakeEvents{j}, sink)
+	assignments, err := orchestrator.Segment(mustDecode(t, validEnvelope), "run-1")
+	if err != nil {
+		t.Fatalf("Segment() error = %v, want nil", err)
+	}
+	if err := m.Start(context.Background(), "run-1", "demo", assignments); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+
+	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err == nil {
+		t.Fatal("JobFinished() error = nil, want the release publish failure surfaced")
+	}
+
+	// The transient failure clears; the event loop redelivers the still-
+	// unacknowledged outcome.
+	sink.failStage = ""
+	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+		t.Fatalf("redelivered JobFinished() error = %v, want the release retried to success", err)
+	}
+	if err := m.JobFinished(context.Background(), "run-1", "test", orchestrator.StatusPassed); err != nil {
+		t.Fatalf("JobFinished(test) error = %v, want nil", err)
+	}
+
+	want := []string{
+		"started:run-1",
+		"assign:run-1:build/compile",
+		"assign:run-1:test/test",
+		"finished:run-1:passed",
+	}
+	if got := j.snapshot(); !reflect.DeepEqual(got, want) {
+		t.Errorf("journal = %v, want %v (release retried after the failure cleared, run finished)", got, want)
+	}
+}
+
+// The ack-lost ordering stays exactly-once: a release that already
+// published is not re-published by a redelivered outcome — the job is no
+// longer pending, so the duplicate is ignored.
+func TestMachineReleaseIsNotDuplicatedByRedelivery(t *testing.T) {
+	j := &journal{}
+	m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j})
+	assignments, err := orchestrator.Segment(mustDecode(t, validEnvelope), "run-1")
+	if err != nil {
+		t.Fatalf("Segment() error = %v, want nil", err)
+	}
+	if err := m.Start(context.Background(), "run-1", "demo", assignments); err != nil {
+		t.Fatalf("Start() error = %v, want nil", err)
+	}
+	if err := m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed); err != nil {
+		t.Fatalf("JobFinished() error = %v, want nil", err)
+	}
+
+	before := j.snapshot()
+	_ = m.JobFinished(context.Background(), "run-1", "compile", orchestrator.StatusPassed)
+
+	if got := j.snapshot(); !reflect.DeepEqual(got, before) {
+		t.Errorf("journal = %v, want unchanged (%v) — no duplicate release for the redelivered outcome", got, before)
 	}
 }

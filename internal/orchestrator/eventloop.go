@@ -34,6 +34,9 @@ func NewEventLoop(client redis.UniversalClient, machine *Machine) *EventLoop {
 // starts at `$`: the bus keeps other producers' history, and runs cannot
 // predate this process — run ids are minted here — so replaying that
 // history would only feed the machine events for runs it never started.
+// On start the loop first recovers its group's own unacknowledged entries
+// (recoverPending), so an outcome left pending by a failed stage release
+// is re-applied.
 func (l *EventLoop) Run(ctx context.Context) error {
 	if ctx.Err() != nil {
 		return nil
@@ -41,6 +44,9 @@ func (l *EventLoop) Run(ctx context.Context) error {
 	err := l.client.XGroupCreateMkStream(ctx, StreamEvents, group, "$").Err()
 	if err != nil && !strings.Contains(err.Error(), "BUSYGROUP") {
 		return fmt.Errorf("ensuring event consumer group: %w", err)
+	}
+	if err := recoverPending(ctx, l.client, StreamEvents, l.apply); err != nil {
+		return err
 	}
 
 	for {
@@ -66,7 +72,7 @@ func (l *EventLoop) Run(ctx context.Context) error {
 		for _, stream := range read {
 			for _, msg := range stream.Messages {
 				if err := l.apply(ctx, msg.Values["envelope"]); err != nil {
-					return err // the entry stays pending; only decided events are acknowledged
+					return err // the entry stays pending; the next start's recovery re-applies it
 				}
 				if err := l.client.XAck(ctx, StreamEvents, group, msg.ID).Err(); err != nil {
 					return fmt.Errorf("acknowledging event: %w", err)
@@ -80,7 +86,8 @@ func (l *EventLoop) Run(ctx context.Context) error {
 // boundary can sequence, and skips it otherwise: malformed envelopes,
 // other producers' event types, and outcomes without terminal status
 // slugs are acknowledged and forgotten. A machine error is a stage-release
-// publish failure — the entry stays pending.
+// publish failure — the entry stays pending and is re-applied by the next
+// start's recovery read (AUD-001).
 func (l *EventLoop) apply(ctx context.Context, envelope any) error {
 	body, ok := envelope.(string)
 	if !ok {

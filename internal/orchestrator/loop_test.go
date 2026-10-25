@@ -246,6 +246,83 @@ func TestLoopPublishesAssignmentsWhenEmitFails(t *testing.T) {
 	}
 }
 
+// AUD-001: a stage-1 publish failure must not strand the run request. The
+// loop exits with the error and the entry stays pending, nothing
+// published; a restarted loop re-reads the group's own pending entries
+// (XREADGROUP 0) and re-hands the entry off under a fresh run id, then
+// acknowledges it.
+func TestLoopRecoversUnacknowledgedRunAfterRestart(t *testing.T) {
+	j := &journal{}
+	sink := &flakyAssignments{j: j, failStage: "build"}
+	mr := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+
+	machine := orchestrator.NewMachine(fakeEvents{j}, sink)
+	loop := orchestrator.NewLoop(client, machine)
+	loop.Block = 25 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- loop.Run(ctx) }()
+
+	seed(t, client, validEnvelope)
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Run() error = nil, want the stage-1 publish failure")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return after the failed hand-off")
+	}
+	pending, err := client.XPending(context.Background(), orchestrator.StreamPipelineRequests, "orchestrator").Result()
+	if err != nil {
+		t.Fatalf("XPending() error = %v", err)
+	}
+	if pending.Count != 1 {
+		t.Fatalf("pending request entries = %d, want 1", pending.Count)
+	}
+	if got := len(j.snapshot()); got != 1 {
+		t.Fatalf("journal = %v, want only the aborted attempt's started event", j.snapshot())
+	}
+
+	// The transient failure clears with the restart: recovery re-hands the
+	// entry off under a fresh run id.
+	sink.failStage = ""
+	recovered := make(chan error, 1)
+	restarted := orchestrator.NewLoop(client, machine)
+	restarted.Block = 25 * time.Millisecond
+	go func() { recovered <- restarted.Run(ctx) }()
+
+	waitFor(t, j, 3) // started (aborted) + started (retry) + first stage
+	waitAcked(t, client, orchestrator.StreamPipelineRequests)
+	cancel()
+	select {
+	case err := <-recovered:
+		if err != nil {
+			t.Fatalf("Run() error = %v, want nil on cancellation", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run() did not return after cancellation")
+	}
+
+	entries := j.snapshot()
+	if len(entries) != 3 {
+		t.Fatalf("journal = %v, want the aborted start, the retried start, and the first stage", entries)
+	}
+	aborted := strings.TrimPrefix(entries[0], "started:")
+	retried := strings.TrimPrefix(entries[1], "started:")
+	if entries[1] == entries[0] || retried == "" {
+		t.Errorf("second entry = %q, want a fresh run id for the recovered hand-off", entries[1])
+	}
+	if entries[2] != "assign:"+retried+":build/compile" {
+		t.Errorf("third entry = %q, want the first stage under the recovered run id %q", entries[2], retried)
+	}
+	if aborted == retried {
+		t.Errorf("both attempts ran under run id %q, want a fresh id per hand-off", aborted)
+	}
+}
+
 func TestLoopStopsWhenContextCancelledBeforeStart(t *testing.T) {
 	mr := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})

@@ -4,6 +4,10 @@ Notable changes to odyssey-core-orchestrator. Latest changes go at the top, unde
 
 ## [Unreleased]
 
+### Changed
+- A failed stage release no longer strands a run (gh-20, AUD-001): `Machine.JobFinished` publishes the next stage before committing the advance, so a publish failure rolls the release back — the triggering job returns to the pending set and the redelivered `job.finished` re-applies the outcome instead of finding it consumed (a recovering stage is at-least-once on the job queue); a release that already succeeded stays idempotent under redelivery, and a run whose releasing stage was never published can no longer resolve as `passed`.
+- Both loops recover their consumer group's unacknowledged entries on start (gh-20, AUD-001): before serving new entries, a loop re-reads the group's own pending entries (`XREADGROUP` with ID 0) and re-processes each — a run request whose stage-1 publish failed is re-handed-off under a fresh run id, and a `job.finished` left pending by a failed release is re-applied and acknowledged — so a transient publish failure or a dead process no longer strands a run behind a pending entry. Doc comments that implied a retry stop doing so.
+
 ### Added
 - Config validation in the composer's Publish (gh-22, AUD-006): the publisher validates the attached resolved configuration before enqueueing — the door holds at the wire for the whole request, not just the envelope.
 - A pipeline cross-check at both run-request boundaries (gh-22, AUD-006): `RunRequest.Validate` — the orchestrator's and the composer's — rejects a request whose `pipeline` and `config.pipeline` disagree, so a run is never segmented under a name its own config contradicts.
