@@ -1,0 +1,12 @@
+# Keeps go.mod and the pinned workflow actions current; every bump proves
+# itself through the check gate (AUD-011).
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
