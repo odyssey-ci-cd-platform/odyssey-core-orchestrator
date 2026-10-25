@@ -240,6 +240,48 @@ func TestMachineReportsErroredAsWorst(t *testing.T) {
 	}
 }
 
+// AUD-015: a slug the machine cannot classify ranks worst — worse than
+// errored, never as success — in either arrival order, and the run reports
+// the contract's errored slug (pipeline.finished's payload status is pinned
+// to passed/failed/errored; contract § Event emission responsibilities).
+func TestMachineRanksUnknownSlugWorst(t *testing.T) {
+	cases := []struct {
+		name   string
+		first  string
+		second string
+	}{
+		{"unknown then passed", "detonated", orchestrator.StatusPassed},
+		{"unknown then failed", "detonated", orchestrator.StatusFailed},
+		{"unknown then errored", "detonated", orchestrator.StatusErrored},
+		{"passed then unknown", orchestrator.StatusPassed, "detonated"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			j := &journal{}
+			m := orchestrator.NewMachine(fakeEvents{j}, fakeAssignments{j})
+			if err := m.Start(context.Background(), "run-1", "demo", twoJobFirstStageAssignments(t, "run-1")); err != nil {
+				t.Fatalf("Start() error = %v, want nil", err)
+			}
+			if err := m.JobFinished(context.Background(), "run-1", "compile", tt.first); err != nil {
+				t.Fatalf("JobFinished(compile) error = %v, want nil", err)
+			}
+			if err := m.JobFinished(context.Background(), "run-1", "lint", tt.second); err != nil {
+				t.Fatalf("JobFinished(lint) error = %v, want nil", err)
+			}
+
+			want := []string{
+				"started:run-1",
+				"assign:run-1:build/compile",
+				"assign:run-1:build/lint",
+				"finished:run-1:errored",
+			}
+			if got := j.snapshot(); !reflect.DeepEqual(got, want) {
+				t.Errorf("journal = %v, want %v (unclassifiable slug outranks every known slug, reported as errored)", got, want)
+			}
+		})
+	}
+}
+
 // After a run ends — or for a run the machine never knew — job outcomes
 // change nothing: no duplicate finishes, no releases.
 func TestMachineIgnoresOutcomesForUntrackedRuns(t *testing.T) {

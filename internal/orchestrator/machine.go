@@ -158,7 +158,7 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 				delete(m.runs, runID)
 			}
 		} else {
-			finished = r.worst
+			finished = runStatus(r.worst)
 			delete(m.runs, runID)
 		}
 	}
@@ -175,16 +175,30 @@ func (m *Machine) JobFinished(ctx context.Context, runID, job, status string) er
 }
 
 // statusRank orders the job outcome slugs the machine sequences on,
-// following the dispatcher's ranking (AUD-010): Errored is worst, then
-// Failed; Passed is best.
+// following the dispatcher's ranking (AUD-010): Errored is worst of the
+// known slugs, then Failed, then Passed. A slug the machine cannot
+// classify ranks worse than Errored (AUD-015) — an unreadable outcome
+// must never be read as success.
 func statusRank(s string) int {
 	switch s {
 	case StatusErrored:
 		return 2
 	case StatusFailed:
 		return 1
+	case StatusPassed:
+		return 0
 	}
-	return 0
+	return 3
+}
+
+// runStatus maps the run's worst outcome onto the contract's
+// pipeline.finished payload slugs (passed/failed/errored): an
+// unclassifiable worst reports as Errored.
+func runStatus(worst string) string {
+	if statusRank(worst) > statusRank(StatusErrored) {
+		return StatusErrored
+	}
+	return worst
 }
 
 // worstStatus returns whichever of a, b ranks worse per statusRank.
