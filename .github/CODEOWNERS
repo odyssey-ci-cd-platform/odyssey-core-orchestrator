@@ -1,0 +1,9 @@
+# Default owner for everything: every PR needs the repo owner's review.
+* @dash-sarthak
+
+# Contracts and core code get an explicit owner line (issue #28, AUD-012):
+# reviews are requested on every PR touching them. Enforcing "require review
+# from Code Owners" is a branch-protection setting the repo admin flips once;
+# this file is the prerequisite.
+/docs/contracts/ @dash-sarthak
+/internal/ @dash-sarthak
